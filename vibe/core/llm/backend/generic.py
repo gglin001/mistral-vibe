@@ -141,7 +141,11 @@ class OpenAIAdapter(APIAdapter):
                 message = LLMMessage.model_validate(data["choices"][0]["delta"])
             else:
                 raise ValueError("Invalid response data")
-            finish_reason = data["choices"][0]["finish_reason"]
+
+            if "finish_reason" in data["choices"][0]:
+                finish_reason = data["choices"][0]["finish_reason"]
+            else:
+                finish_reason = None
 
         elif "message" in data:
             message = LLMMessage.model_validate(data["message"])
