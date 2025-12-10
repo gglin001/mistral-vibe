@@ -1,3 +1,8 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+pixi.lock
+
 # General
 .DS_Store
 .AppleDouble
