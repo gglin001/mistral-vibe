@@ -19,14 +19,8 @@ from pydantic_settings import (
 )
 import tomli_w
 
-from vibe.core.config_path import (
-    AGENT_DIR,
-    CONFIG_DIR,
-    CONFIG_FILE,
-    GLOBAL_ENV_FILE,
-    PROMPT_DIR,
-    SESSION_LOG_DIR,
-)
+from vibe.core.paths.config_paths import AGENT_DIR, CONFIG_DIR, CONFIG_FILE, PROMPT_DIR
+from vibe.core.paths.global_paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
 from vibe.core.prompts import SystemPrompt
 from vibe.core.tools.base import BaseToolConfig
 
@@ -137,6 +131,7 @@ class ProviderConfig(BaseModel):
     api_key_env_var: str = ""
     api_style: str = "openai"
     backend: Backend = Backend.GENERIC
+    reasoning_field_name: str = "reasoning_content"
 
 
 class _MCPBase(BaseModel):
@@ -279,12 +274,12 @@ DEFAULT_MODELS = [
 
 class VibeConfig(BaseSettings):
     active_model: str = "devstral-2"
+    textual_theme: str = "terminal"
     vim_keybindings: bool = False
     disable_welcome_banner_animation: bool = False
     displayed_workdir: str = ""
     auto_compact_threshold: int = 200_000
     context_warnings: bool = False
-    textual_theme: str = "textual-dark"
     instructions: str = ""
     workdir: Path | None = Field(default=None, exclude=True)
     system_prompt_id: str = "cli"
@@ -302,7 +297,7 @@ class VibeConfig(BaseSettings):
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
     tools: dict[str, BaseToolConfig] = Field(default_factory=dict)
-    tool_paths: list[str] = Field(
+    tool_paths: list[Path] = Field(
         default_factory=list,
         description=(
             "Additional directories to search for custom tools. "
@@ -329,6 +324,14 @@ class VibeConfig(BaseSettings):
             "A list of tool names/patterns to disable. Ignored if 'enabled_tools'"
             " is set. Supports exact names, glob patterns (e.g., 'bash*'), and"
             " regex with 're:' prefix or regex-like patterns."
+        ),
+    )
+
+    skill_paths: list[Path] = Field(
+        default_factory=list,
+        description=(
+            "Additional directories to search for skills. "
+            "Each path may be absolute or relative to the current working directory."
         ),
     )
 
@@ -423,6 +426,20 @@ class VibeConfig(BaseSettings):
         except ValueError:
             pass
         return self
+
+    @field_validator("tool_paths", mode="before")
+    @classmethod
+    def _expand_tool_paths(cls, v: Any) -> list[Path]:
+        if not v:
+            return []
+        return [Path(p).expanduser().resolve() for p in v]
+
+    @field_validator("skill_paths", mode="before")
+    @classmethod
+    def _expand_skill_paths(cls, v: Any) -> list[Path]:
+        if not v:
+            return []
+        return [Path(p).expanduser().resolve() for p in v]
 
     @field_validator("workdir", mode="before")
     @classmethod
@@ -523,26 +540,7 @@ class VibeConfig(BaseSettings):
 
     @classmethod
     def _migrate(cls) -> None:
-        if not CONFIG_FILE.path.is_file():
-            return
-
-        try:
-            with CONFIG_FILE.path.open("rb") as f:
-                config = tomllib.load(f)
-        except (OSError, tomllib.TOMLDecodeError):
-            return
-
-        needs_save = False
-
-        if (
-            "auto_compact_threshold" not in config
-            or config["auto_compact_threshold"] == 100_000  # noqa: PLR2004
-        ):
-            config["auto_compact_threshold"] = 200_000
-            needs_save = True
-
-        if needs_save:
-            cls.dump_config(config)
+        pass
 
     @classmethod
     def load(cls, agent: str | None = None, **overrides: Any) -> VibeConfig:

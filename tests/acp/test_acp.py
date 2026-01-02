@@ -83,6 +83,9 @@ def _create_vibe_home_dir(tmp_path: Path, *sections: dict[str, Any]) -> Path:
     with config_file.open("wb") as f:
         tomli_w.dump(base_config_dict, f)
 
+    trusted_folters_file = vibe_home / "trusted_folders.toml"
+    trusted_folters_file.write_text("trusted = []\nuntrusted = []", encoding="utf-8")
+
     return vibe_home
 
 
@@ -423,7 +426,7 @@ class TestSessionManagement:
 class TestSessionUpdates:
     @pytest.mark.asyncio
     async def test_agent_message_chunk_structure(self, vibe_home_dir: Path) -> None:
-        mock_env = get_mocking_env([mock_llm_chunk(content="Hi") for _ in range(2)])
+        mock_env = get_mocking_env([mock_llm_chunk(content="Hi")])
         async for process in get_acp_agent_process(
             mock_env=mock_env, vibe_home=vibe_home_dir
         ):
@@ -462,7 +465,6 @@ class TestSessionUpdates:
     @pytest.mark.asyncio
     async def test_tool_call_update_structure(self, vibe_home_dir: Path) -> None:
         mock_env = get_mocking_env([
-            mock_llm_chunk(content="Hey"),
             mock_llm_chunk(
                 tool_calls=[
                     ToolCall(
@@ -472,14 +474,9 @@ class TestSessionUpdates:
                         type="function",
                         index=0,
                     )
-                ],
-                name="bash",
-                finish_reason="tool_calls",
+                ]
             ),
-            mock_llm_chunk(
-                content="The files containing the pattern 'auth' are ...",
-                finish_reason="stop",
-            ),
+            mock_llm_chunk(content="The files containing the pattern 'auth' are ..."),
         ])
         async for process in get_acp_agent_process(
             mock_env=mock_env, vibe_home=vibe_home_dir
@@ -564,7 +561,6 @@ class TestToolCallStructure:
         self, vibe_home_grep_ask: Path
     ) -> None:
         custom_results = [
-            mock_llm_chunk(content="Hey"),
             mock_llm_chunk(
                 tool_calls=[
                     ToolCall(
@@ -575,10 +571,8 @@ class TestToolCallStructure:
                         type="function",
                         index=0,
                     )
-                ],
-                name="grep",
-                finish_reason="tool_calls",
-            ),
+                ]
+            )
         ]
         mock_env = get_mocking_env(custom_results)
         async for process in get_acp_agent_process(
@@ -625,7 +619,6 @@ class TestToolCallStructure:
         self, vibe_home_grep_ask: Path
     ) -> None:
         custom_results = [
-            mock_llm_chunk(content="Hey"),
             mock_llm_chunk(
                 tool_calls=[
                     ToolCall(
@@ -636,13 +629,10 @@ class TestToolCallStructure:
                         type="function",
                         index=0,
                     )
-                ],
-                name="grep",
-                finish_reason="tool_calls",
+                ]
             ),
-            mock_llm_chunk(
-                content="The search for 'auth' has been completed", finish_reason="stop"
-            ),
+            mock_llm_chunk(content="The search for 'auth' has been completed"),
+            mock_llm_chunk(content="The file test.txt has been created"),
         ]
         mock_env = get_mocking_env(custom_results)
         async for process in get_acp_agent_process(
@@ -689,7 +679,6 @@ class TestToolCallStructure:
         self, vibe_home_grep_ask: Path
     ) -> None:
         custom_results = [
-            mock_llm_chunk(content="Hey"),
             mock_llm_chunk(
                 tool_calls=[
                     ToolCall(
@@ -700,14 +689,11 @@ class TestToolCallStructure:
                         type="function",
                         index=0,
                     )
-                ],
-                name="grep",
-                finish_reason="tool_calls",
+                ]
             ),
             mock_llm_chunk(
                 content="The search for 'auth' has not been performed, "
-                "because you rejected the permission request",
-                finish_reason="stop",
+                "because you rejected the permission request"
             ),
         ]
         mock_env = get_mocking_env(custom_results)
@@ -756,7 +742,6 @@ class TestToolCallStructure:
         self, vibe_home_grep_ask: Path
     ) -> None:
         custom_results = [
-            mock_llm_chunk(content="Hey"),
             mock_llm_chunk(
                 tool_calls=[
                     ToolCall(
@@ -767,13 +752,10 @@ class TestToolCallStructure:
                         type="function",
                         index=0,
                     )
-                ],
-                name="grep",
-                finish_reason="tool_calls",
+                ]
             ),
-            mock_llm_chunk(
-                content="The search for 'auth' has been completed", finish_reason="stop"
-            ),
+            mock_llm_chunk(content="The search for 'auth' has been completed"),
+            mock_llm_chunk(content="The command sleep 3 has been run"),
         ]
         mock_env = get_mocking_env(custom_results)
         async for process in get_acp_agent_process(
@@ -817,7 +799,6 @@ class TestToolCallStructure:
         self, vibe_home_grep_ask: Path
     ) -> None:
         custom_results = [
-            mock_llm_chunk(content="Hey"),
             mock_llm_chunk(
                 tool_calls=[
                     ToolCall(
@@ -828,14 +809,11 @@ class TestToolCallStructure:
                         type="function",
                         index=0,
                     )
-                ],
-                name="grep",
-                finish_reason="tool_calls",
+                ]
             ),
             mock_llm_chunk(
                 content="The search for 'auth' has failed "
-                "because the path does not exist",
-                finish_reason="stop",
+                "because the path does not exist"
             ),
         ]
         mock_env = get_mocking_env(custom_results)
@@ -891,7 +869,6 @@ class TestCancellationStructure:
         self, vibe_home_dir: Path
     ) -> None:
         custom_results = [
-            mock_llm_chunk(content="Hey"),
             mock_llm_chunk(
                 tool_calls=[
                     ToolCall(
@@ -903,14 +880,11 @@ class TestCancellationStructure:
                         type="function",
                         index=0,
                     )
-                ],
-                name="write_file",
-                finish_reason="tool_calls",
+                ]
             ),
             mock_llm_chunk(
                 content="The file test.txt has not been created, "
-                "because you cancelled the permission request",
-                finish_reason="stop",
+                "because you cancelled the permission request"
             ),
         ]
         mock_env = get_mocking_env(custom_results)
