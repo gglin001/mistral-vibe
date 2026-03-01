@@ -4,9 +4,10 @@ from collections.abc import Callable
 
 import pytest
 
+from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
-from vibe.core.agent import Agent
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import (
     Backend,
     ModelConfig,
@@ -14,7 +15,6 @@ from vibe.core.config import (
     SessionLoggingConfig,
     VibeConfig,
 )
-from vibe.core.modes import AgentMode
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import (
     AgentStats,
@@ -25,6 +25,7 @@ from vibe.core.types import (
     LLMMessage,
     Role,
     ToolCall,
+    UserMessageEvent,
 )
 
 
@@ -78,7 +79,7 @@ def make_config(
             backend=Backend.MISTRAL,
         ),
     ]
-    return VibeConfig(
+    return build_test_vibe_config(
         session_logging=SessionLoggingConfig(enabled=not disable_logging),
         auto_compact_threshold=auto_compact_threshold,
         system_prompt_id=system_prompt_id,
@@ -160,7 +161,7 @@ class TestReloadPreservesStats:
     @pytest.mark.asyncio
     async def test_reload_preserves_session_tokens(self) -> None:
         backend = FakeBackend(mock_llm_chunk(content="First response"))
-        agent = Agent(make_config(), backend=backend)
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
 
         async for _ in agent.act("Hello"):
             pass
@@ -193,7 +194,9 @@ class TestReloadPreservesStats:
             mock_llm_chunk(content="Done"),
         ])
         config = make_config(enabled_tools=["todo"])
-        agent = Agent(config, mode=AgentMode.AUTO_APPROVE, backend=backend)
+        agent = build_test_agent_loop(
+            config=config, agent_name=BuiltinAgentName.AUTO_APPROVE, backend=backend
+        )
 
         async for _ in agent.act("Check todos"):
             pass
@@ -212,7 +215,7 @@ class TestReloadPreservesStats:
             [mock_llm_chunk(content="R1")],
             [mock_llm_chunk(content="R2")],
         ])
-        agent = Agent(make_config(), backend=backend)
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
 
         async for _ in agent.act("First"):
             pass
@@ -231,7 +234,7 @@ class TestReloadPreservesStats:
         self,
     ) -> None:
         backend = FakeBackend(mock_llm_chunk(content="Response"))
-        agent = Agent(make_config(), backend=backend)
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
         [_ async for _ in agent.act("Hello")]
         assert agent.stats.context_tokens > 0
         initial_context_tokens = agent.stats.context_tokens
@@ -245,7 +248,7 @@ class TestReloadPreservesStats:
     @pytest.mark.asyncio
     async def test_reload_resets_context_tokens_when_no_messages(self) -> None:
         backend = FakeBackend([])
-        agent = Agent(make_config(), backend=backend)
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
         assert len(agent.messages) == 1
         assert agent.stats.context_tokens == 0
 
@@ -261,13 +264,13 @@ class TestReloadPreservesStats:
         backend = FakeBackend(mock_llm_chunk(content="Response"))
         config1 = make_config(system_prompt_id="tests")
         config2 = make_config(system_prompt_id="cli")
-        agent = Agent(config1, backend=backend)
+        agent = build_test_agent_loop(config=config1, backend=backend)
         [_ async for _ in agent.act("Hello")]
         original_context_tokens = agent.stats.context_tokens
         assert original_context_tokens > 0
         assert len(agent.messages) > 1
 
-        await agent.reload_with_initial_messages(config=config2)
+        await agent.reload_with_initial_messages(base_config=config2)
 
         assert len(agent.messages) > 1
         assert agent.stats.context_tokens == original_context_tokens
@@ -278,7 +281,7 @@ class TestReloadPreservesStats:
 
         backend = FakeBackend(mock_llm_chunk(content="Response"))
         config_mistral = make_config(active_model="devstral-latest")
-        agent = Agent(config_mistral, backend=backend)
+        agent = build_test_agent_loop(config=config_mistral, backend=backend)
 
         async for _ in agent.act("Hello"):
             pass
@@ -287,7 +290,7 @@ class TestReloadPreservesStats:
         assert agent.stats.output_price_per_million == 2.0
 
         config_other = make_config(active_model="strawberry")
-        await agent.reload_with_initial_messages(config=config_other)
+        await agent.reload_with_initial_messages(base_config=config_other)
 
         assert agent.stats.input_price_per_million == 2.5
         assert agent.stats.output_price_per_million == 10.0
@@ -301,7 +304,7 @@ class TestReloadPreservesStats:
             [mock_llm_chunk(content="After reload")],
         ])
         config1 = make_config(active_model="devstral-latest")
-        agent = Agent(config1, backend=backend)
+        agent = build_test_agent_loop(config=config1, backend=backend)
 
         async for _ in agent.act("Hello"):
             pass
@@ -311,7 +314,7 @@ class TestReloadPreservesStats:
         )
 
         config2 = make_config(active_model="strawberry")
-        await agent.reload_with_initial_messages(config=config2)
+        await agent.reload_with_initial_messages(base_config=config2)
 
         async for _ in agent.act("Continue"):
             pass
@@ -326,7 +329,7 @@ class TestReloadPreservesMessages:
     @pytest.mark.asyncio
     async def test_reload_preserves_conversation_messages(self) -> None:
         backend = FakeBackend(mock_llm_chunk(content="Response"))
-        agent = Agent(make_config(), backend=backend)
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
 
         async for _ in agent.act("Hello"):
             pass
@@ -348,7 +351,7 @@ class TestReloadPreservesMessages:
     async def test_reload_updates_system_prompt_preserves_rest(self) -> None:
         backend = FakeBackend(mock_llm_chunk(content="Response"))
         config1 = make_config(system_prompt_id="tests")
-        agent = Agent(config1, backend=backend)
+        agent = build_test_agent_loop(config=config1, backend=backend)
 
         async for _ in agent.act("Hello"):
             pass
@@ -357,7 +360,7 @@ class TestReloadPreservesMessages:
         old_user = agent.messages[1].content
 
         config2 = make_config(system_prompt_id="cli")
-        await agent.reload_with_initial_messages(config=config2)
+        await agent.reload_with_initial_messages(base_config=config2)
 
         assert agent.messages[0].content != old_system
         assert agent.messages[1].content == old_user
@@ -365,7 +368,7 @@ class TestReloadPreservesMessages:
     @pytest.mark.asyncio
     async def test_reload_with_no_messages_stays_empty(self) -> None:
         backend = FakeBackend([])
-        agent = Agent(make_config(), backend=backend)
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
 
         assert len(agent.messages) == 1
 
@@ -375,12 +378,12 @@ class TestReloadPreservesMessages:
         assert agent.messages[0].role == Role.system
 
     @pytest.mark.asyncio
-    async def test_reload_notifies_observer_with_all_messages(
-        self, observer_capture
-    ) -> None:
+    async def test_reload_does_not_reemit_to_observer(self, observer_capture) -> None:
         observed, observer = observer_capture
         backend = FakeBackend(mock_llm_chunk(content="Response"))
-        agent = Agent(make_config(), message_observer=observer, backend=backend)
+        agent = build_test_agent_loop(
+            config=make_config(), message_observer=observer, backend=backend
+        )
 
         async for _ in agent.act("Hello"):
             pass
@@ -389,10 +392,7 @@ class TestReloadPreservesMessages:
 
         await agent.reload_with_initial_messages()
 
-        assert len(observed) == 3
-        assert observed[0].role == Role.system
-        assert observed[1].role == Role.user
-        assert observed[2].role == Role.assistant
+        assert len(observed) == 0
 
 
 class TestCompactStatsHandling:
@@ -402,7 +402,7 @@ class TestCompactStatsHandling:
             [mock_llm_chunk(content="First response")],
             [mock_llm_chunk(content="<summary>")],
         ])
-        agent = Agent(make_config(), backend=backend)
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
 
         async for _ in agent.act("Build something"):
             pass
@@ -424,7 +424,7 @@ class TestCompactStatsHandling:
             [mock_llm_chunk(content="Long response " * 100)],
             [mock_llm_chunk(content="<summary>")],
         ])
-        agent = Agent(make_config(), backend=backend)
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
 
         async for _ in agent.act("Do something complex"):
             pass
@@ -456,7 +456,9 @@ class TestCompactStatsHandling:
             [mock_llm_chunk(content="<summary>")],
         ])
         config = make_config(enabled_tools=["todo"])
-        agent = Agent(config, mode=AgentMode.AUTO_APPROVE, backend=backend)
+        agent = build_test_agent_loop(
+            config=config, agent_name=BuiltinAgentName.AUTO_APPROVE, backend=backend
+        )
 
         async for _ in agent.act("Check todos"):
             pass
@@ -473,10 +475,12 @@ class TestCompactStatsHandling:
             [mock_llm_chunk(content="Long response " * 100)],
             [mock_llm_chunk(content="<summary>")],
         ])
-        agent = Agent(make_config(disable_logging=False), backend=backend)
+        agent = build_test_agent_loop(
+            config=make_config(disable_logging=False), backend=backend
+        )
 
         original_session_id = agent.session_id
-        original_logger_session_id = agent.interaction_logger.session_id
+        original_logger_session_id = agent.session_logger.session_id
 
         assert agent.session_id == original_logger_session_id
 
@@ -486,7 +490,7 @@ class TestCompactStatsHandling:
         await agent.compact()
 
         assert agent.session_id != original_session_id
-        assert agent.session_id == agent.interaction_logger.session_id
+        assert agent.session_id == agent.session_logger.session_id
 
 
 class TestAutoCompactIntegration:
@@ -501,23 +505,23 @@ class TestAutoCompactIntegration:
             [mock_llm_chunk(content="<summary>")],
             [mock_llm_chunk(content="<final>")],
         ])
-        cfg = VibeConfig(
-            session_logging=SessionLoggingConfig(enabled=False),
-            auto_compact_threshold=1,
+        cfg = build_test_vibe_config(auto_compact_threshold=1)
+        agent = build_test_agent_loop(
+            config=cfg, message_observer=observer, backend=backend
         )
-        agent = Agent(cfg, message_observer=observer, backend=backend)
         agent.stats.context_tokens = 2
 
         events = [ev async for ev in agent.act("Hello")]
 
-        assert len(events) == 3
-        assert isinstance(events[0], CompactStartEvent)
-        assert isinstance(events[1], CompactEndEvent)
-        assert isinstance(events[2], AssistantEvent)
+        assert len(events) == 4
+        assert isinstance(events[0], UserMessageEvent)
+        assert isinstance(events[1], CompactStartEvent)
+        assert isinstance(events[2], CompactEndEvent)
+        assert isinstance(events[3], AssistantEvent)
 
-        start: CompactStartEvent = events[0]
-        end: CompactEndEvent = events[1]
-        final: AssistantEvent = events[2]
+        start: CompactStartEvent = events[1]
+        end: CompactEndEvent = events[2]
+        final: AssistantEvent = events[3]
 
         assert start.current_context_tokens == 2
         assert start.threshold == 1
@@ -527,17 +531,35 @@ class TestAutoCompactIntegration:
 
         roles = [r for r, _ in observed]
         assert roles == [Role.system, Role.user, Role.assistant]
-        assert (
-            observed[1][1] is not None
-            and "Last request from user was: Hello" in observed[1][1]
-        )
+        assert observed[1][1] == "Hello"
 
 
 class TestClearHistoryFullReset:
     @pytest.mark.asyncio
+    async def test_clear_history_preserves_listeners(self) -> None:
+        backend = FakeBackend(mock_llm_chunk(content="Response"))
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
+
+        listener_calls: list[int] = []
+        agent.stats.add_listener(
+            "context_tokens", lambda s: listener_calls.append(s.context_tokens)
+        )
+
+        async for _ in agent.act("Hello"):
+            pass
+
+        assert agent.stats.context_tokens > 0
+        listener_calls.clear()
+
+        await agent.clear_history()
+
+        assert agent.stats.context_tokens == 0
+        assert any(v == 0 for v in listener_calls)
+
+    @pytest.mark.asyncio
     async def test_clear_history_fully_resets_stats(self) -> None:
         backend = FakeBackend(mock_llm_chunk(content="Response"))
-        agent = Agent(make_config(), backend=backend)
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
 
         async for _ in agent.act("Hello"):
             pass
@@ -555,7 +577,7 @@ class TestClearHistoryFullReset:
     async def test_clear_history_preserves_pricing(self) -> None:
         backend = FakeBackend(mock_llm_chunk(content="Response"))
         config = make_config(input_price=0.4, output_price=2.0)
-        agent = Agent(config, backend=backend)
+        agent = build_test_agent_loop(config=config, backend=backend)
 
         async for _ in agent.act("Hello"):
             pass
@@ -568,7 +590,7 @@ class TestClearHistoryFullReset:
     @pytest.mark.asyncio
     async def test_clear_history_removes_messages(self) -> None:
         backend = FakeBackend(mock_llm_chunk(content="Response"))
-        agent = Agent(make_config(), backend=backend)
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
 
         async for _ in agent.act("Hello"):
             pass
@@ -583,10 +605,12 @@ class TestClearHistoryFullReset:
     @pytest.mark.asyncio
     async def test_clear_history_resets_session_id(self) -> None:
         backend = FakeBackend(mock_llm_chunk(content="Response"))
-        agent = Agent(make_config(disable_logging=False), backend=backend)
+        agent = build_test_agent_loop(
+            config=make_config(disable_logging=False), backend=backend
+        )
 
         original_session_id = agent.session_id
-        original_logger_session_id = agent.interaction_logger.session_id
+        original_logger_session_id = agent.session_logger.session_id
 
         assert agent.session_id == original_logger_session_id
 
@@ -596,7 +620,38 @@ class TestClearHistoryFullReset:
         await agent.clear_history()
 
         assert agent.session_id != original_session_id
-        assert agent.session_id == agent.interaction_logger.session_id
+        assert agent.session_id == agent.session_logger.session_id
+
+
+class TestClearHistoryObserverBugfix:
+    @pytest.mark.asyncio
+    async def test_clear_history_observer_sees_new_messages(
+        self, observer_capture
+    ) -> None:
+        """Bug fix: clear_history previously left a stale index, so new messages
+        appended after clearing were never observed.
+        """
+        observed, observer = observer_capture
+        backend = FakeBackend([
+            [mock_llm_chunk(content="First")],
+            [mock_llm_chunk(content="Second")],
+        ])
+        agent = build_test_agent_loop(
+            config=make_config(), message_observer=observer, backend=backend
+        )
+
+        async for _ in agent.act("Hello"):
+            pass
+
+        await agent.clear_history()
+        observed.clear()
+
+        async for _ in agent.act("After clear"):
+            pass
+
+        roles = [msg.role for msg in observed]
+        assert Role.user in roles
+        assert Role.assistant in roles
 
 
 class TestStatsEdgeCases:
@@ -608,7 +663,7 @@ class TestStatsEdgeCases:
 
         backend = FakeBackend(mock_llm_chunk(content="Response"))
         config1 = make_config(active_model="devstral-latest")
-        agent = Agent(config1, backend=backend)
+        agent = build_test_agent_loop(config=config1, backend=backend)
 
         async for _ in agent.act("Hello"):
             pass
@@ -616,7 +671,7 @@ class TestStatsEdgeCases:
         cost_before = agent.stats.session_cost
 
         config2 = make_config(active_model="strawberry")
-        await agent.reload_with_initial_messages(config=config2)
+        await agent.reload_with_initial_messages(base_config=config2)
 
         cost_after = agent.stats.session_cost
 
@@ -629,7 +684,7 @@ class TestStatsEdgeCases:
             [mock_llm_chunk(content="R2")],
             [mock_llm_chunk(content="R3")],
         ])
-        agent = Agent(make_config(), backend=backend)
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
 
         async for _ in agent.act("First"):
             pass
@@ -654,7 +709,7 @@ class TestStatsEdgeCases:
             [mock_llm_chunk(content="<summary>")],
             [mock_llm_chunk(content="After reload")],
         ])
-        agent = Agent(make_config(), backend=backend)
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
 
         async for _ in agent.act("Build something"):
             pass
@@ -675,9 +730,9 @@ class TestStatsEdgeCases:
     async def test_reload_without_config_preserves_current(self) -> None:
         backend = FakeBackend([])
         original_config = make_config(active_model="devstral-latest")
-        agent = Agent(original_config, backend=backend)
+        agent = build_test_agent_loop(config=original_config, backend=backend)
 
-        await agent.reload_with_initial_messages(config=None)
+        await agent.reload_with_initial_messages(base_config=None)
 
         assert agent.config.active_model == "devstral-latest"
 
@@ -685,9 +740,9 @@ class TestStatsEdgeCases:
     async def test_reload_with_new_config_updates_it(self) -> None:
         backend = FakeBackend([])
         original_config = make_config(active_model="devstral-latest")
-        agent = Agent(original_config, backend=backend)
+        agent = build_test_agent_loop(config=original_config, backend=backend)
 
         new_config = make_config(active_model="devstral-small")
-        await agent.reload_with_initial_messages(config=new_config)
+        await agent.reload_with_initial_messages(base_config=new_config)
 
         assert agent.config.active_model == "devstral-small"

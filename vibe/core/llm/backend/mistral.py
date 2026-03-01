@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 import json
 import os
 import re
@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 
 import httpx
 import mistralai
+from mistralai.utils.retries import BackoffStrategy, RetryConfig
 
 from vibe.core.llm.exceptions import BackendErrorBuilder
+from vibe.core.llm.message_utils import merge_consecutive_user_messages
 from vibe.core.types import (
     AvailableTool,
     Content,
@@ -141,7 +143,7 @@ class MistralMapper:
                     name=tool_call.function.name,
                     arguments=tool_call.function.arguments
                     if isinstance(tool_call.function.arguments, str)
-                    else json.dumps(tool_call.function.arguments),
+                    else json.dumps(tool_call.function.arguments, ensure_ascii=False),
                 ),
                 index=tool_call.index,
             )
@@ -177,13 +179,22 @@ class MistralBackend:
             )
         self._server_url = match.group(1)
         self._timeout = timeout
+        self._retry_config = self._build_retry_config()
+
+    def _build_retry_config(self) -> RetryConfig:
+        return RetryConfig(
+            strategy="backoff",
+            backoff=BackoffStrategy(
+                initial_interval=500,
+                max_interval=30000,
+                exponent=1.5,
+                max_elapsed_time=300000,
+            ),
+            retry_connection_errors=True,
+        )
 
     async def __aenter__(self) -> MistralBackend:
-        self._client = mistralai.Mistral(
-            api_key=self._api_key,
-            server_url=self._server_url,
-            timeout_ms=int(self._timeout * 1000),
-        )
+        self._client = self._create_mistral_client()
         await self._client.__aenter__()
         return self
 
@@ -198,28 +209,36 @@ class MistralBackend:
                 exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb
             )
 
+    def _create_mistral_client(self) -> mistralai.Mistral:
+        return mistralai.Mistral(
+            api_key=self._api_key,
+            server_url=self._server_url,
+            timeout_ms=int(self._timeout * 1000),
+            retry_config=self._retry_config,
+        )
+
     def _get_client(self) -> mistralai.Mistral:
         if self._client is None:
-            self._client = mistralai.Mistral(
-                api_key=self._api_key, server_url=self._server_url
-            )
+            self._client = self._create_mistral_client()
         return self._client
 
     async def complete(
         self,
         *,
         model: ModelConfig,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         tools: list[AvailableTool] | None,
         max_tokens: int | None,
         tool_choice: StrToolChoice | AvailableTool | None,
         extra_headers: dict[str, str] | None,
+        metadata: dict[str, str] | None = None,
     ) -> LLMChunk:
         try:
+            merged_messages = merge_consecutive_user_messages(messages)
             response = await self._get_client().chat.complete_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in messages],
+                messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools
@@ -229,6 +248,7 @@ class MistralBackend:
                 if tool_choice
                 else None,
                 http_headers=extra_headers,
+                metadata=metadata,
                 stream=False,
             )
 
@@ -282,17 +302,19 @@ class MistralBackend:
         self,
         *,
         model: ModelConfig,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         tools: list[AvailableTool] | None,
         max_tokens: int | None,
         tool_choice: StrToolChoice | AvailableTool | None,
         extra_headers: dict[str, str] | None,
+        metadata: dict[str, str] | None = None,
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
+            merged_messages = merge_consecutive_user_messages(messages)
             async for chunk in await self._get_client().chat.stream_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in messages],
+                messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools
@@ -302,6 +324,7 @@ class MistralBackend:
                 if tool_choice
                 else None,
                 http_headers=extra_headers,
+                metadata=metadata,
             ):
                 parsed = (
                     self._mapper.parse_content(chunk.data.choices[0].delta.content)
@@ -357,11 +380,12 @@ class MistralBackend:
         self,
         *,
         model: ModelConfig,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float = 0.0,
         tools: list[AvailableTool] | None = None,
         tool_choice: StrToolChoice | AvailableTool | None = None,
         extra_headers: dict[str, str] | None = None,
+        metadata: dict[str, str] | None = None,
     ) -> int:
         result = await self.complete(
             model=model,
@@ -371,6 +395,7 @@ class MistralBackend:
             max_tokens=1,
             tool_choice=tool_choice,
             extra_headers=extra_headers,
+            metadata=metadata,
         )
         if result.usage is None:
             raise ValueError("Missing usage in non streaming completion")

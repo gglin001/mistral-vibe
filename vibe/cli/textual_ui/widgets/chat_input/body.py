@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
@@ -12,6 +12,21 @@ from textual.widgets import Static
 
 from vibe.cli.history_manager import HistoryManager
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea, InputMode
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
+
+
+class _PromptSpinner(SpinnerMixin, Static):
+    SPINNER_TYPE: ClassVar[SpinnerType] = SpinnerType.BRAILLE
+
+    def __init__(self) -> None:
+        self._indicator_widget: Static | None = None
+        self.init_spinner()
+        super().__init__(self._spinner.current_frame(), id="prompt-spinner")
+
+    def on_mount(self) -> None:
+        self._indicator_widget = self
+        self.start_spinner_timer()
 
 
 class ChatInputBody(Widget):
@@ -20,10 +35,17 @@ class ChatInputBody(Widget):
             self.value = value
             super().__init__()
 
-    def __init__(self, history_file: Path | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        history_file: Path | None = None,
+        nuage_enabled: bool = False,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         self.input_widget: ChatTextArea | None = None
-        self.prompt_widget: Static | None = None
+        self.prompt_widget: NoMarkupStatic | None = None
+        self._nuage_enabled = nuage_enabled
+        self._switching_mode = False
 
         if history_file:
             self.history = HistoryManager(history_file)
@@ -34,10 +56,12 @@ class ChatInputBody(Widget):
 
     def compose(self) -> ComposeResult:
         with Horizontal():
-            self.prompt_widget = Static(">", id="prompt")
+            self.prompt_widget = NoMarkupStatic(">", id="prompt")
             yield self.prompt_widget
 
-            self.input_widget = ChatTextArea(placeholder="Ask anything...", id="input")
+            self.input_widget = ChatTextArea(
+                id="input", nuage_enabled=self._nuage_enabled
+            )
             yield self.input_widget
 
     def on_mount(self) -> None:
@@ -49,6 +73,8 @@ class ChatInputBody(Widget):
             return "!", text[1:]
         elif text.startswith("/"):
             return "/", text[1:]
+        elif text.startswith("&") and self._nuage_enabled:
+            return "&", text[1:]
         else:
             return ">", text
 
@@ -149,6 +175,9 @@ class ChatInputBody(Widget):
     def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         event.stop()
 
+        if self._switching_mode:
+            return
+
         if not self.input_widget:
             return
 
@@ -164,6 +193,25 @@ class ChatInputBody(Widget):
             self._notify_completion_reset()
 
             self.post_message(self.Submitted(value))
+
+    @property
+    def switching_mode(self) -> bool:
+        return self._switching_mode
+
+    @switching_mode.setter
+    def switching_mode(self, value: bool) -> None:
+        self._switching_mode = value
+        if value:
+            if self.prompt_widget:
+                self.prompt_widget.display = False
+            if not self.query(_PromptSpinner):
+                self.query_one(Horizontal).mount(_PromptSpinner(), before=0)
+        else:
+            for spinner in self.query(_PromptSpinner):
+                spinner.remove()
+            if self.prompt_widget:
+                self.prompt_widget.display = True
+                self._update_prompt()
 
     @property
     def value(self) -> str:

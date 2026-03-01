@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from acp import WriteTextFileRequest
 from acp.helpers import SessionUpdate
 from acp.schema import (
     FileEditToolCallContent,
@@ -13,17 +12,16 @@ from acp.schema import (
 
 from vibe import VIBE_ROOT
 from vibe.acp.tools.base import AcpToolState, BaseAcpTool
-from vibe.core.tools.base import ToolError
+from vibe.core.tools.base import BaseToolState, ToolError
 from vibe.core.tools.builtins.write_file import (
     WriteFile as CoreWriteFileTool,
     WriteFileArgs,
     WriteFileResult,
-    WriteFileState,
 )
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
 
-class AcpWriteFileState(WriteFileState, AcpToolState):
+class AcpWriteFileState(BaseToolState, AcpToolState):
     pass
 
 
@@ -38,45 +36,52 @@ class WriteFile(CoreWriteFileTool, BaseAcpTool[AcpWriteFileState]):
         return AcpWriteFileState
 
     async def _write_file(self, args: WriteFileArgs, file_path: Path) -> None:
-        connection, session_id, _ = self._load_state()
-
-        write_request = WriteTextFileRequest(
-            sessionId=session_id, path=str(file_path), content=args.content
-        )
+        client, session_id, _ = self._load_state()
 
         await self._send_in_progress_session_update()
 
         try:
-            await connection.writeTextFile(write_request)
+            await client.write_text_file(
+                session_id=session_id, path=str(file_path), content=args.content
+            )
         except Exception as e:
             raise ToolError(f"Error writing {file_path}: {e}") from e
 
     @classmethod
     def tool_call_session_update(cls, event: ToolCallEvent) -> SessionUpdate | None:
         args = event.args
+        if args is None:
+            return ToolCallStart(
+                session_update="tool_call",
+                title="write_file",
+                tool_call_id=event.tool_call_id,
+                kind="edit",
+                content=None,
+                raw_input=None,
+            )
         if not isinstance(args, WriteFileArgs):
             return None
 
         return ToolCallStart(
-            sessionUpdate="tool_call",
+            session_update="tool_call",
             title=cls.get_call_display(event).summary,
-            toolCallId=event.tool_call_id,
+            tool_call_id=event.tool_call_id,
             kind="edit",
             content=[
                 FileEditToolCallContent(
-                    type="diff", path=args.path, oldText=None, newText=args.content
+                    type="diff", path=args.path, old_text=None, new_text=args.content
                 )
             ],
             locations=[ToolCallLocation(path=args.path)],
-            rawInput=args.model_dump_json(),
+            raw_input=args.model_dump_json(),
         )
 
     @classmethod
     def tool_result_session_update(cls, event: ToolResultEvent) -> SessionUpdate | None:
         if event.error:
             return ToolCallProgress(
-                sessionUpdate="tool_call_update",
-                toolCallId=event.tool_call_id,
+                session_update="tool_call_update",
+                tool_call_id=event.tool_call_id,
                 status="failed",
             )
 
@@ -85,14 +90,17 @@ class WriteFile(CoreWriteFileTool, BaseAcpTool[AcpWriteFileState]):
             return None
 
         return ToolCallProgress(
-            sessionUpdate="tool_call_update",
-            toolCallId=event.tool_call_id,
+            session_update="tool_call_update",
+            tool_call_id=event.tool_call_id,
             status="completed",
             content=[
                 FileEditToolCallContent(
-                    type="diff", path=result.path, oldText=None, newText=result.content
+                    type="diff",
+                    path=result.path,
+                    old_text=None,
+                    new_text=result.content,
                 )
             ],
             locations=[ToolCallLocation(path=result.path)],
-            rawOutput=result.model_dump_json(),
+            raw_output=result.model_dump_json(),
         )

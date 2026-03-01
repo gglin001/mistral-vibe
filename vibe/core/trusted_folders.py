@@ -6,6 +6,20 @@ import tomllib
 import tomli_w
 
 from vibe.core.paths.global_paths import TRUSTED_FOLDERS_FILE
+from vibe.core.paths.local_config_walk import walk_local_config_dirs_all
+
+AGENTS_MD_FILENAMES = ["AGENTS.md", "VIBE.md", ".vibe.md"]
+
+
+def has_agents_md_file(path: Path) -> bool:
+    return any((path / name).exists() for name in AGENTS_MD_FILENAMES)
+
+
+def has_trustable_content(path: Path) -> bool:
+    if (path / ".vibe").exists():
+        return True
+    tools_dirs, skills_dirs, agents_dirs = walk_local_config_dirs_all(path)
+    return bool(tools_dirs or skills_dirs or agents_dirs) or has_agents_md_file(path)
 
 
 class TrustedFoldersManager:

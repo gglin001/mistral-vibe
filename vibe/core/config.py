@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 from enum import StrEnum, auto
 import os
 from pathlib import Path
@@ -19,20 +20,29 @@ from pydantic_settings import (
 )
 import tomli_w
 
-from vibe.core.paths.config_paths import AGENT_DIR, CONFIG_DIR, CONFIG_FILE, PROMPT_DIR
-from vibe.core.paths.global_paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
+from vibe.core.paths.config_paths import CONFIG_DIR, CONFIG_FILE, PROMPTS_DIR
+from vibe.core.paths.global_paths import (
+    GLOBAL_ENV_FILE,
+    GLOBAL_PROMPTS_DIR,
+    SESSION_LOG_DIR,
+)
 from vibe.core.prompts import SystemPrompt
 from vibe.core.tools.base import BaseToolConfig
 
-PROJECT_DOC_FILENAMES = ["AGENTS.md", "VIBE.md", ".vibe.md"]
 
+def load_dotenv_values(
+    env_path: Path = GLOBAL_ENV_FILE.path,
+    environ: MutableMapping[str, str] = os.environ,
+) -> None:
+    # We allow FIFO path to support some environment management solutions (e.g. https://developer.1password.com/docs/environments/local-env-file/)
+    if not env_path.is_file() and not env_path.is_fifo():
+        return
 
-def load_api_keys_from_env() -> None:
-    if GLOBAL_ENV_FILE.path.is_file():
-        env_vars = dotenv_values(GLOBAL_ENV_FILE.path)
-        for key, value in env_vars.items():
-            if value:
-                os.environ.setdefault(key, value)
+    env_vars = dotenv_values(env_path)
+    for key, value in env_vars.items():
+        if not value:
+            continue
+        environ.update({key: value})
 
 
 class MissingAPIKeyError(RuntimeError):
@@ -45,11 +55,17 @@ class MissingAPIKeyError(RuntimeError):
 
 
 class MissingPromptFileError(RuntimeError):
-    def __init__(self, system_prompt_id: str, prompt_dir: str) -> None:
+    def __init__(
+        self, system_prompt_id: str, prompt_dir: str, global_prompt_dir: str
+    ) -> None:
+        extra_global_prompt_dir = (
+            f" or {global_prompt_dir}" if global_prompt_dir != prompt_dir else ""
+        )
+
         super().__init__(
             f"Invalid system_prompt_id value: '{system_prompt_id}'. "
             f"Must be one of the available prompts ({', '.join(f'{p.name.lower()}' for p in SystemPrompt)}), "
-            f"or correspond to a .md file in {prompt_dir}"
+            f"or correspond to a .md file in {prompt_dir}{extra_global_prompt_dir}"
         )
         self.system_prompt_id = system_prompt_id
         self.prompt_dir = prompt_dir
@@ -132,12 +148,26 @@ class ProviderConfig(BaseModel):
     api_style: str = "openai"
     backend: Backend = Backend.GENERIC
     reasoning_field_name: str = "reasoning_content"
+    project_id: str = ""
+    region: str = ""
 
 
 class _MCPBase(BaseModel):
     name: str = Field(description="Short alias used to prefix tool names")
     prompt: str | None = Field(
         default=None, description="Optional usage hint appended to tool descriptions"
+    )
+    startup_timeout_sec: float = Field(
+        default=10.0,
+        gt=0,
+        description="Timeout in seconds for the server to start and initialize.",
+    )
+    tool_timeout_sec: float = Field(
+        default=60.0, gt=0, description="Timeout in seconds for tool execution."
+    )
+    sampling_enabled: bool = Field(
+        default=True,
+        description="Allow this MCP server to request LLM completions via sampling/createMessage.",
     )
 
     @field_validator("name", mode="after")
@@ -201,6 +231,10 @@ class MCPStdio(_MCPBase):
     transport: Literal["stdio"]
     command: str | list[str]
     args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables to set for the MCP server process.",
+    )
 
     def argv(self) -> list[str]:
         base = (
@@ -223,6 +257,7 @@ class ModelConfig(BaseModel):
     temperature: float = 0.2
     input_price: float = 0.0  # Price per million input tokens
     output_price: float = 0.0  # Price per million output tokens
+    thinking: Literal["off", "low", "medium", "high"] = "off"
 
     @model_validator(mode="before")
     @classmethod
@@ -233,11 +268,14 @@ class ModelConfig(BaseModel):
         return data
 
 
+DEFAULT_MISTRAL_API_ENV_KEY = "MISTRAL_API_KEY"
+
+
 DEFAULT_PROVIDERS = [
     ProviderConfig(
         name="mistral",
         api_base="https://api.mistral.ai/v1",
-        api_key_env_var="MISTRAL_API_KEY",
+        api_key_env_var=DEFAULT_MISTRAL_API_ENV_KEY,
         backend=Backend.MISTRAL,
     ),
     ProviderConfig(
@@ -274,21 +312,32 @@ DEFAULT_MODELS = [
 
 class VibeConfig(BaseSettings):
     active_model: str = "devstral-2"
-    textual_theme: str = "terminal"
     vim_keybindings: bool = False
     disable_welcome_banner_animation: bool = False
+    autocopy_to_clipboard: bool = True
+    file_watcher_for_autocomplete: bool = False
     displayed_workdir: str = ""
     auto_compact_threshold: int = 200_000
     context_warnings: bool = False
-    instructions: str = ""
-    workdir: Path | None = Field(default=None, exclude=True)
+    auto_approve: bool = False
+    enable_telemetry: bool = True
     system_prompt_id: str = "cli"
     include_commit_signature: bool = True
     include_model_info: bool = True
     include_project_context: bool = True
     include_prompt_detail: bool = True
     enable_update_checks: bool = True
+    enable_auto_update: bool = True
+    enable_notifications: bool = True
     api_timeout: float = 720.0
+
+    # TODO(vibe-nuage): remove exclude=True once the feature is publicly available
+    nuage_enabled: bool = Field(default=False, exclude=True)
+    nuage_base_url: str = Field(default="https://api.globalaegis.net", exclude=True)
+    nuage_workflow_id: str = Field(default="__shared-nuage-workflow", exclude=True)
+    # TODO(vibe-nuage): change default value to MISTRAL_API_KEY once prod has shared vibe-nuage workers
+    nuage_api_key_env_var: str = Field(default="STAGING_MISTRAL_API_KEY", exclude=True)
+
     providers: list[ProviderConfig] = Field(
         default_factory=lambda: list(DEFAULT_PROVIDERS)
     )
@@ -300,8 +349,10 @@ class VibeConfig(BaseSettings):
     tool_paths: list[Path] = Field(
         default_factory=list,
         description=(
-            "Additional directories to search for custom tools. "
-            "Each path may be absolute or relative to the current working directory."
+            "Additional directories or files to explore for custom tools. "
+            "Paths may be absolute or relative to the current working directory. "
+            "Directories are shallow-searched for tool definition files, "
+            "while files are loaded directly if valid."
         ),
     )
 
@@ -313,25 +364,59 @@ class VibeConfig(BaseSettings):
         default_factory=list,
         description=(
             "An explicit list of tool names/patterns to enable. If set, only these"
-            " tools will be active. Supports exact names, glob patterns (e.g.,"
-            " 'serena_*'), and regex with 're:' prefix or regex-like patterns (e.g.,"
-            " 're:^serena_.*' or 'serena.*')."
+            " tools will be active. Supports glob patterns (e.g., 'serena_*') and"
+            " regex with 're:' prefix (e.g., 're:^serena_.*')."
         ),
     )
     disabled_tools: list[str] = Field(
         default_factory=list,
         description=(
             "A list of tool names/patterns to disable. Ignored if 'enabled_tools'"
-            " is set. Supports exact names, glob patterns (e.g., 'bash*'), and"
-            " regex with 're:' prefix or regex-like patterns."
+            " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
-
+    agent_paths: list[Path] = Field(
+        default_factory=list,
+        description=(
+            "Additional directories to search for custom agent profiles. "
+            "Each path may be absolute or relative to the current working directory."
+        ),
+    )
+    enabled_agents: list[str] = Field(
+        default_factory=list,
+        description=(
+            "An explicit list of agent names/patterns to enable. If set, only these"
+            " agents will be available. Supports glob patterns (e.g., 'custom-*')"
+            " and regex with 're:' prefix."
+        ),
+    )
+    disabled_agents: list[str] = Field(
+        default_factory=list,
+        description=(
+            "A list of agent names/patterns to disable. Ignored if 'enabled_agents'"
+            " is set. Supports glob patterns and regex with 're:' prefix."
+        ),
+    )
     skill_paths: list[Path] = Field(
         default_factory=list,
         description=(
             "Additional directories to search for skills. "
             "Each path may be absolute or relative to the current working directory."
+        ),
+    )
+    enabled_skills: list[str] = Field(
+        default_factory=list,
+        description=(
+            "An explicit list of skill names/patterns to enable. If set, only these"
+            " skills will be active. Supports glob patterns (e.g., 'search-*') and"
+            " regex with 're:' prefix."
+        ),
+    )
+    disabled_skills: list[str] = Field(
+        default_factory=list,
+        description=(
+            "A list of skill names/patterns to disable. Ignored if 'enabled_skills'"
+            " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
 
@@ -340,8 +425,8 @@ class VibeConfig(BaseSettings):
     )
 
     @property
-    def effective_workdir(self) -> Path:
-        return self.workdir if self.workdir is not None else Path.cwd()
+    def nuage_api_key(self) -> str:
+        return os.getenv(self.nuage_api_key_env_var, "")
 
     @property
     def system_prompt(self) -> str:
@@ -350,10 +435,16 @@ class VibeConfig(BaseSettings):
         except KeyError:
             pass
 
-        custom_sp_path = (PROMPT_DIR.path / self.system_prompt_id).with_suffix(".md")
-        if not custom_sp_path.is_file():
-            raise MissingPromptFileError(self.system_prompt_id, str(PROMPT_DIR.path))
-        return custom_sp_path.read_text()
+        for current_prompt_dir in [PROMPTS_DIR.path, GLOBAL_PROMPTS_DIR.path]:
+            custom_sp_path = (current_prompt_dir / self.system_prompt_id).with_suffix(
+                ".md"
+            )
+            if custom_sp_path.is_file():
+                return custom_sp_path.read_text()
+
+        raise MissingPromptFileError(
+            self.system_prompt_id, str(PROMPTS_DIR.path), str(GLOBAL_PROMPTS_DIR.path)
+        )
 
     def get_active_model(self) -> ModelConfig:
         for model in self.models:
@@ -441,22 +532,6 @@ class VibeConfig(BaseSettings):
             return []
         return [Path(p).expanduser().resolve() for p in v]
 
-    @field_validator("workdir", mode="before")
-    @classmethod
-    def _expand_workdir(cls, v: Any) -> Path | None:
-        if v is None or (isinstance(v, str) and not v.strip()):
-            return None
-
-        if isinstance(v, str):
-            v = Path(v).expanduser().resolve()
-        elif isinstance(v, Path):
-            v = v.expanduser().resolve()
-        if not v.is_dir():
-            raise ValueError(
-                f"Tried to set {v} as working directory, path doesn't exist"
-            )
-        return v
-
     @field_validator("tools", mode="before")
     @classmethod
     def _normalize_tool_configs(cls, v: Any) -> dict[str, BaseToolConfig]:
@@ -526,28 +601,13 @@ class VibeConfig(BaseSettings):
             tomli_w.dump(config, f)
 
     @classmethod
-    def _get_agent_config(cls, agent: str | None) -> dict[str, Any] | None:
-        if agent is None:
-            return None
-
-        agent_config_path = (AGENT_DIR.path / agent).with_suffix(".toml")
-        try:
-            return tomllib.load(agent_config_path.open("rb"))
-        except FileNotFoundError:
-            raise ValueError(
-                f"Config '{agent}.toml' for agent not found in {AGENT_DIR.path}"
-            )
-
-    @classmethod
     def _migrate(cls) -> None:
         pass
 
     @classmethod
-    def load(cls, agent: str | None = None, **overrides: Any) -> VibeConfig:
+    def load(cls, **overrides: Any) -> VibeConfig:
         cls._migrate()
-        agent_config = cls._get_agent_config(agent)
-        init_data = {**(agent_config or {}), **overrides}
-        return cls(**init_data)
+        return cls(**(overrides or {}))
 
     @classmethod
     def create_default(cls) -> dict[str, Any]:

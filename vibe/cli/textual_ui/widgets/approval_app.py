@@ -10,6 +10,7 @@ from textual.containers import Container, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Static
 
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tool_widgets import get_approval_widget
 from vibe.core.config import VibeConfig
 
@@ -51,12 +52,11 @@ class ApprovalApp(Container):
             self.tool_args = tool_args
 
     def __init__(
-        self, tool_name: str, tool_args: BaseModel, workdir: str, config: VibeConfig
+        self, tool_name: str, tool_args: BaseModel, config: VibeConfig
     ) -> None:
         super().__init__(id="approval-app")
         self.tool_name = tool_name
         self.tool_args = tool_args
-        self.workdir = workdir
         self.config = config
         self.selected_option = 0
         self.content_container: Vertical | None = None
@@ -66,8 +66,20 @@ class ApprovalApp(Container):
         self.help_widget: Static | None = None
 
     def compose(self) -> ComposeResult:
+        with Vertical(id="approval-options"):
+            yield NoMarkupStatic("")
+            for _ in range(3):
+                widget = NoMarkupStatic("", classes="approval-option")
+                self.option_widgets.append(widget)
+                yield widget
+            yield NoMarkupStatic("")
+            self.help_widget = NoMarkupStatic(
+                "↑↓ navigate  Enter select  ESC reject", classes="approval-help"
+            )
+            yield self.help_widget
+
         with Vertical(id="approval-content"):
-            self.title_widget = Static(
+            self.title_widget = NoMarkupStatic(
                 f"⚠ {self.tool_name} command", classes="approval-title"
             )
             yield self.title_widget
@@ -77,20 +89,6 @@ class ApprovalApp(Container):
                     classes="approval-tool-info-container"
                 )
                 yield self.tool_info_container
-
-            yield Static("")
-
-            for _ in range(3):
-                widget = Static("", classes="approval-option")
-                self.option_widgets.append(widget)
-                yield widget
-
-            yield Static("")
-
-            self.help_widget = Static(
-                "↑↓ navigate  Enter select  ESC reject", classes="approval-help"
-            )
-            yield self.help_widget
 
     async def on_mount(self) -> None:
         await self._update_tool_info()

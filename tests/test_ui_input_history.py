@@ -9,17 +9,6 @@ from vibe.cli.history_manager import HistoryManager
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.body import ChatInputBody
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
-from vibe.core.config import SessionLoggingConfig, VibeConfig
-
-
-@pytest.fixture
-def vibe_config() -> VibeConfig:
-    return VibeConfig(session_logging=SessionLoggingConfig(enabled=False))
-
-
-@pytest.fixture
-def vibe_app(vibe_config: VibeConfig, tmp_path: Path) -> VibeApp:
-    return VibeApp(config=vibe_config)
 
 
 @pytest.fixture

@@ -4,10 +4,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Static
 
-from vibe.cli.textual_ui.widgets.messages import ExpandingBorder
+from vibe.cli.textual_ui.widgets.messages import ExpandingBorder, NonSelectableStatic
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
 from vibe.cli.textual_ui.widgets.tool_widgets import get_result_widget
-from vibe.cli.textual_ui.widgets.utils import DEFAULT_TOOL_SHORTCUT, TOOL_SHORTCUTS
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
@@ -20,8 +20,9 @@ class ToolCallMessage(StatusMessage):
             raise ValueError("Either event or tool_name must be provided")
 
         self._event = event
-        self._tool_name = tool_name or (event.tool_name if event else "unknown")
+        self._tool_name = tool_name or (event.tool_name if event else None) or "unknown"
         self._is_history = event is None
+        self._stream_widget: NoMarkupStatic | None = None
 
         super().__init__()
         self.add_class("tool-call")
@@ -29,12 +30,60 @@ class ToolCallMessage(StatusMessage):
         if self._is_history:
             self._is_spinning = False
 
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="tool-call-container"):
+            with Horizontal():
+                self._indicator_widget = NonSelectableStatic(
+                    self._spinner.current_frame(), classes="status-indicator-icon"
+                )
+                yield self._indicator_widget
+                self._text_widget = NoMarkupStatic("", classes="status-indicator-text")
+                yield self._text_widget
+            self._stream_widget = NoMarkupStatic("", classes="tool-stream-message")
+            self._stream_widget.display = False
+            yield self._stream_widget
+
+    def on_mount(self) -> None:
+        super().on_mount()
+        siblings = list(self.parent.children) if self.parent else []
+        idx = siblings.index(self) if self in siblings else -1
+        if idx > 0 and isinstance(
+            siblings[idx - 1], (ToolCallMessage, ToolResultMessage)
+        ):
+            self.add_class("no-gap")
+
+    @property
+    def tool_call_id(self) -> str | None:
+        return self._event.tool_call_id if self._event else None
+
     def get_content(self) -> str:
-        if self._event and self._event.tool_class:
+        if self._event:
             adapter = ToolUIDataAdapter(self._event.tool_class)
             display = adapter.get_call_display(self._event)
             return display.summary
         return self._tool_name
+
+    def update_event(self, event: ToolCallEvent) -> None:
+        self._event = event
+        self._tool_name = event.tool_name
+        if self._text_widget:
+            self._text_widget.update(self.get_content())
+
+    def set_stream_message(self, message: str) -> None:
+        """Update the stream message displayed below the tool call indicator."""
+        if self._stream_widget:
+            self._stream_widget.update(f"→ {message}")
+            self._stream_widget.display = True
+
+    def stop_spinning(self, success: bool = True) -> None:
+        """Stop the spinner and hide the stream widget."""
+        if self._stream_widget:
+            self._stream_widget.display = False
+        super().stop_spinning(success)
+
+    def set_result_text(self, text: str) -> None:
+        if self._text_widget:
+            self._text_widget.update(text)
 
 
 class ToolResultMessage(Static):
@@ -64,13 +113,6 @@ class ToolResultMessage(Static):
     def tool_name(self) -> str:
         return self._tool_name
 
-    def _shortcut(self) -> str:
-        return TOOL_SHORTCUTS.get(self._tool_name, DEFAULT_TOOL_SHORTCUT)
-
-    def _hint(self) -> str:
-        action = "expand" if self.collapsed else "collapse"
-        return f"({self._shortcut()} to {action})"
-
     def compose(self) -> ComposeResult:
         with Horizontal(classes="tool-result-container"):
             yield ExpandingBorder(classes="tool-result-border")
@@ -79,11 +121,39 @@ class ToolResultMessage(Static):
 
     async def on_mount(self) -> None:
         if self._call_widget:
-            success = self._event is None or (
-                not self._event.error and not self._event.skipped
-            )
+            success = self._determine_success()
             self._call_widget.stop_spinning(success=success)
+            result_text = self._get_result_text()
+            self._call_widget.set_result_text(result_text)
         await self._render_result()
+
+    def _determine_success(self) -> bool:
+        if self._event is None:
+            return True
+        if self._event.error or self._event.skipped:
+            return False
+        if self._event.tool_class:
+            adapter = ToolUIDataAdapter(self._event.tool_class)
+            display = adapter.get_result_display(self._event)
+            return display.success
+        return True
+
+    def _get_result_text(self) -> str:
+        if self._event is None:
+            return f"{self._tool_name} completed"
+
+        if self._event.error:
+            return f"{self._tool_name}: error"
+
+        if self._event.skipped:
+            return f"{self._tool_name}: skipped"
+
+        if self._event.tool_class:
+            adapter = ToolUIDataAdapter(self._event.tool_class)
+            display = adapter.get_result_display(self._event)
+            return display.message
+
+        return f"{self._tool_name} completed"
 
     async def _render_result(self) -> None:
         if self._content_container is None:
@@ -92,39 +162,35 @@ class ToolResultMessage(Static):
         await self._content_container.remove_children()
 
         if self._event is None:
-            await self._render_simple()
+            if self._content:
+                await self._content_container.mount(
+                    NoMarkupStatic(self._content, classes="tool-result-detail")
+                )
+                self.display = not self.collapsed
+            else:
+                self.display = False
             return
 
         if self._event.error:
             self.add_class("error-text")
-            if self.collapsed:
-                await self._content_container.mount(
-                    Static(f"Error. {self._hint()}", markup=False)
-                )
-            else:
-                await self._content_container.mount(
-                    Static(f"Error: {self._event.error}", markup=False)
-                )
+            await self._content_container.mount(
+                NoMarkupStatic(f"Error: {self._event.error}")
+            )
+            self.display = True
             return
 
         if self._event.skipped:
             self.add_class("warning-text")
             reason = self._event.skip_reason or "User skipped"
-            if self.collapsed:
-                await self._content_container.mount(
-                    Static(f"Skipped. {self._hint()}", markup=False)
-                )
-            else:
-                await self._content_container.mount(
-                    Static(f"Skipped: {reason}", markup=False)
-                )
+            await self._content_container.mount(NoMarkupStatic(f"Skipped: {reason}"))
+            self.display = True
             return
 
         self.remove_class("error-text")
         self.remove_class("warning-text")
 
         if self._event.tool_class is None:
-            await self._render_simple()
+            self.display = False
             return
 
         adapter = ToolUIDataAdapter(self._event.tool_class)
@@ -139,23 +205,7 @@ class ToolResultMessage(Static):
             warnings=display.warnings,
         )
         await self._content_container.mount(widget)
-
-    async def _render_simple(self) -> None:
-        if self._content_container is None:
-            return
-
-        if self.collapsed:
-            await self._content_container.mount(
-                Static(f"{self._tool_name} completed {self._hint()}", markup=False)
-            )
-            return
-
-        if self._content:
-            await self._content_container.mount(Static(self._content, markup=False))
-        else:
-            await self._content_container.mount(
-                Static(f"{self._tool_name} completed.", markup=False)
-            )
+        self.display = bool(widget.children)
 
     async def set_collapsed(self, collapsed: bool) -> None:
         if self.collapsed == collapsed:

@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
 import concurrent.futures
+from datetime import UTC, datetime
 from enum import Enum, auto
+from fnmatch import fnmatch
 import functools
-import logging
 from pathlib import Path
 import re
 import sys
@@ -15,7 +16,6 @@ import httpx
 
 from vibe import __version__
 from vibe.core.config import Backend
-from vibe.core.paths.global_paths import LOG_DIR, LOG_FILE
 from vibe.core.types import BaseEvent, ToolResultEvent
 
 CANCELLATION_TAG = "user_cancellation"
@@ -135,18 +135,7 @@ def is_dangerous_directory(path: Path | str = ".") -> tuple[bool, str]:
     return False, ""
 
 
-LOG_DIR.path.mkdir(parents=True, exist_ok=True)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE.path, "a", "utf-8")],
-)
-
-logger = logging.getLogger("vibe")
-
-
-def get_user_agent(backend: Backend) -> str:
+def get_user_agent(backend: Backend | None) -> str:
     user_agent = f"Mistral-Vibe/{__version__}"
     if backend == Backend.MISTRAL:
         mistral_sdk_prefix = "mistral-client-python/"
@@ -273,3 +262,80 @@ def run_sync[T](coro: Coroutine[Any, Any, T]) -> T:
 
 def is_windows() -> bool:
     return sys.platform == "win32"
+
+
+@functools.lru_cache(maxsize=256)
+def _compile_icase(expr: str) -> re.Pattern[str] | None:
+    try:
+        return re.compile(expr, re.IGNORECASE)
+    except re.error:
+        return None
+
+
+def name_matches(name: str, patterns: list[str]) -> bool:
+    """Check if a name matches any of the provided patterns.
+
+    Supports two forms (case-insensitive):
+    - Glob wildcards using fnmatch (e.g., 'serena_*')
+    - Regex when prefixed with 're:' (e.g., 're:serena.*')
+    """
+    n = name.lower()
+    for raw in patterns:
+        if not (p := (raw or "").strip()):
+            continue
+
+        if p.startswith("re:"):
+            rx = _compile_icase(p.removeprefix("re:"))
+            if rx is not None and rx.fullmatch(name) is not None:
+                return True
+        elif fnmatch(n, p.lower()):
+            return True
+
+    return False
+
+
+class AsyncExecutor:
+    """Run sync functions in a thread pool with timeout. Supports async context manager."""
+
+    def __init__(
+        self, max_workers: int = 4, timeout: float = 60.0, name: str = "async-executor"
+    ) -> None:
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix=name
+        )
+        self._timeout = timeout
+
+    async def __aenter__(self) -> AsyncExecutor:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        self.shutdown(wait=False)
+
+    async def run[T](self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(
+            self._executor, functools.partial(fn, *args, **kwargs)
+        )
+        try:
+            return await asyncio.wait_for(future, timeout=self._timeout)
+        except TimeoutError as e:
+            raise TimeoutError(f"Operation timed out after {self._timeout}s") from e
+
+    def shutdown(self, wait: bool = True) -> None:
+        self._executor.shutdown(wait=wait)
+
+
+def compact_reduction_display(old_tokens: int | None, new_tokens: int | None) -> str:
+    if old_tokens is None or new_tokens is None:
+        return "Compaction complete"
+
+    reduction = old_tokens - new_tokens
+    reduction_pct = (reduction / old_tokens * 100) if old_tokens > 0 else 0
+    return (
+        f"Compaction complete: {old_tokens:,} → "
+        f"{new_tokens:,} tokens ({-reduction_pct:+#0.2g}%)"
+    )
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)

@@ -2,21 +2,27 @@ from __future__ import annotations
 
 from abc import ABC
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 import copy
 from enum import StrEnum, auto
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, overload
+from uuid import uuid4
+
+if TYPE_CHECKING:
+    from vibe.core.tools.base import BaseTool
+else:
+    BaseTool = Any
 
 from pydantic import (
     BaseModel,
     BeforeValidator,
     ConfigDict,
     Field,
+    PrivateAttr,
     computed_field,
     model_validator,
 )
-
-from vibe.core.tools.base import BaseTool
 
 
 class AgentStats(BaseModel):
@@ -37,6 +43,30 @@ class AgentStats(BaseModel):
 
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
+
+    _listeners: dict[str, Callable[[AgentStats], None]] = PrivateAttr(
+        default_factory=dict
+    )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        super().__setattr__(name, value)
+        if name in self._listeners:
+            self._listeners[name](self)
+
+    def trigger_listeners(self) -> None:
+        for listener in self._listeners.values():
+            listener(self)
+
+    def add_listener(
+        self, attr_name: str, listener: Callable[[AgentStats], None]
+    ) -> None:
+        self._listeners[attr_name] = listener
+
+    @staticmethod
+    def create_fresh(previous: AgentStats) -> AgentStats:
+        fresh = AgentStats()
+        fresh._listeners = previous._listeners.copy()
+        return fresh
 
     @computed_field
     @property
@@ -104,8 +134,19 @@ class SessionMetadata(BaseModel):
     git_commit: str | None
     git_branch: str | None
     environment: dict[str, str | None]
-    auto_approve: bool = False
     username: str
+
+
+class ClientMetadata(BaseModel):
+    name: str
+    version: str
+
+
+class EntrypointMetadata(BaseModel):
+    agent_entrypoint: Literal["cli", "acp", "programmatic"]
+    agent_version: str
+    client_name: str
+    client_version: str
 
 
 StrToolChoice = Literal["auto", "none", "any", "required"]
@@ -131,7 +172,7 @@ class ToolCall(BaseModel):
     id: str | None = None
     index: int | None = None
     function: FunctionCall = Field(default_factory=FunctionCall)
-    type: str = "function"
+    type: Literal["function"] = "function"
 
 
 def _content_before(v: Any) -> str:
@@ -169,9 +210,11 @@ class LLMMessage(BaseModel):
     role: Role
     content: Content | None = None
     reasoning_content: Content | None = None
+    reasoning_signature: str | None = None
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
     tool_call_id: str | None = None
+    message_id: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -179,14 +222,20 @@ class LLMMessage(BaseModel):
         if isinstance(v, dict):
             v.setdefault("content", "")
             v.setdefault("role", "assistant")
+            if "message_id" not in v and v.get("role") != "tool":
+                v["message_id"] = str(uuid4())
             return v
+        role = str(getattr(v, "role", "assistant"))
         return {
-            "role": str(getattr(v, "role", "assistant")),
+            "role": role,
             "content": getattr(v, "content", ""),
             "reasoning_content": getattr(v, "reasoning_content", None),
+            "reasoning_signature": getattr(v, "reasoning_signature", None),
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),
+            "message_id": getattr(v, "message_id", None)
+            or (str(uuid4()) if role != "tool" else None),
         }
 
     def __add__(self, other: LLMMessage) -> LLMMessage:
@@ -209,6 +258,12 @@ class LLMMessage(BaseModel):
         )
         if not reasoning_content:
             reasoning_content = None
+
+        reasoning_signature = (self.reasoning_signature or "") + (
+            other.reasoning_signature or ""
+        )
+        if not reasoning_signature:
+            reasoning_signature = None
 
         tool_calls_map = OrderedDict[int, ToolCall]()
         for tool_calls in [self.tool_calls or [], other.tool_calls or []]:
@@ -235,9 +290,11 @@ class LLMMessage(BaseModel):
             role=self.role,
             content=content,
             reasoning_content=reasoning_content,
+            reasoning_signature=reasoning_signature,
             tool_calls=list(tool_calls_map.values()) or None,
             name=self.name,
             tool_call_id=self.tool_call_id,
+            message_id=self.message_id,
         )
 
 
@@ -267,32 +324,39 @@ class LLMChunk(BaseModel):
 
 
 class BaseEvent(BaseModel, ABC):
-    """Abstract base class for all agent events."""
-
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class UserMessageEvent(BaseEvent):
+    content: str
+    message_id: str
 
 
 class AssistantEvent(BaseEvent):
     content: str
     stopped_by_middleware: bool = False
+    message_id: str | None = None
 
     def __add__(self, other: AssistantEvent) -> AssistantEvent:
         return AssistantEvent(
             content=self.content + other.content,
             stopped_by_middleware=self.stopped_by_middleware
             or other.stopped_by_middleware,
+            message_id=self.message_id or other.message_id,
         )
 
 
 class ReasoningEvent(BaseEvent):
     content: str
+    message_id: str | None = None
 
 
 class ToolCallEvent(BaseEvent):
+    tool_call_id: str
     tool_name: str
     tool_class: type[BaseTool]
-    args: BaseModel
-    tool_call_id: str
+    tool_call_index: int | None = None
+    args: BaseModel | None = None
 
 
 class ToolResultEvent(BaseEvent):
@@ -306,15 +370,31 @@ class ToolResultEvent(BaseEvent):
     tool_call_id: str
 
 
+class ToolStreamEvent(BaseEvent):
+    tool_name: str
+    message: str
+    tool_call_id: str
+
+
 class CompactStartEvent(BaseEvent):
     current_context_tokens: int
     threshold: int
+    # WORKAROUND: Using tool_call to communicate compact events to the client.
+    # This should be revisited when the ACP protocol defines how compact events
+    # should be represented.
+    # [RFD](https://agentclientprotocol.com/rfds/session-usage)
+    tool_call_id: str
 
 
 class CompactEndEvent(BaseEvent):
     old_context_tokens: int
     new_context_tokens: int
     summary_length: int
+    # WORKAROUND: Using tool_call to communicate compact events to the client.
+    # This should be revisited when the ACP protocol defines how compact events
+    # should be represented.
+    # [RFD](https://agentclientprotocol.com/rfds/session-usage)
+    tool_call_id: str
 
 
 class OutputFormat(StrEnum):
@@ -332,3 +412,76 @@ type SyncApprovalCallback = Callable[
 ]
 
 type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback
+
+type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
+
+
+class MessageList(Sequence[LLMMessage]):
+    def __init__(
+        self,
+        initial: list[LLMMessage] | None = None,
+        observer: Callable[[LLMMessage], None] | None = None,
+    ) -> None:
+        self._data: list[LLMMessage] = list(initial) if initial else []
+        self._observer = observer
+        self._silent = False
+        if self._observer:
+            for msg in self._data:
+                self._observer(msg)
+
+    def _notify(self, msg: LLMMessage) -> None:
+        if not self._silent and self._observer is not None:
+            self._observer(msg)
+
+    def append(self, msg: LLMMessage) -> None:
+        self._data.append(msg)
+        self._notify(msg)
+
+    def insert(self, i: int, msg: LLMMessage) -> None:
+        self._data.insert(i, msg)
+
+    def extend(self, msgs: list[LLMMessage]) -> None:
+        for msg in msgs:
+            self.append(msg)
+
+    def reset(self, new: list[LLMMessage]) -> None:
+        """Replace contents silently (never notifies)."""
+        self._data = list(new)
+
+    @contextmanager
+    def silent(self) -> Iterator[None]:
+        """Context manager that suppresses notifications."""
+        prev = self._silent
+        self._silent = True
+        try:
+            yield
+        finally:
+            self._silent = prev
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    @overload
+    def __getitem__(self, index: int) -> LLMMessage: ...
+    @overload
+    def __getitem__(self, index: slice) -> list[LLMMessage]: ...
+    def __getitem__(self, index: int | slice) -> LLMMessage | list[LLMMessage]:
+        return self._data[index]
+
+    def __iter__(self) -> Iterator[LLMMessage]:
+        return iter(self._data)
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._data
+
+    def __bool__(self) -> bool:
+        return bool(self._data)
+
+
+class RateLimitError(Exception):
+    def __init__(self, provider: str, model: str) -> None:
+        self.provider = provider
+        self.model = model
+        super().__init__(
+            "Rate limits exceeded. Please wait a moment before trying again."
+        )

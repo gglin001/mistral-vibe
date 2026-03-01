@@ -7,17 +7,12 @@ from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Container, Vertical
 from textual.message import Message
-from textual.theme import BUILTIN_THEMES
 from textual.widgets import Static
 
-from vibe.cli.textual_ui.terminal_theme import TERMINAL_THEME_NAME
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
-
-_ALL_THEMES = [TERMINAL_THEME_NAME] + sorted(
-    k for k in BUILTIN_THEMES if k != "textual-ansi"
-)
 
 
 class SettingDefinition(TypedDict):
@@ -25,7 +20,6 @@ class SettingDefinition(TypedDict):
     label: str
     type: str
     options: list[str]
-    value: str
 
 
 class ConfigApp(Container):
@@ -46,21 +40,15 @@ class ConfigApp(Container):
             self.value = value
 
     class ConfigClosed(Message):
-        def __init__(self, changes: dict[str, str]) -> None:
+        def __init__(self, changes: dict[str, str | bool]) -> None:
             super().__init__()
             self.changes = changes
 
-    def __init__(self, config: VibeConfig, *, has_terminal_theme: bool = False) -> None:
+    def __init__(self, config: VibeConfig) -> None:
         super().__init__(id="config-app")
         self.config = config
         self.selected_index = 0
         self.changes: dict[str, str] = {}
-
-        themes = (
-            _ALL_THEMES
-            if has_terminal_theme
-            else [t for t in _ALL_THEMES if t != TERMINAL_THEME_NAME]
-        )
 
         self.settings: list[SettingDefinition] = [
             {
@@ -68,14 +56,18 @@ class ConfigApp(Container):
                 "label": "Model",
                 "type": "cycle",
                 "options": [m.alias for m in self.config.models],
-                "value": self.config.active_model,
             },
             {
-                "key": "textual_theme",
-                "label": "Theme",
+                "key": "autocopy_to_clipboard",
+                "label": "Auto-copy",
                 "type": "cycle",
-                "options": themes,
-                "value": self.config.textual_theme,
+                "options": ["On", "Off"],
+            },
+            {
+                "key": "file_watcher_for_autocomplete",
+                "label": "Autocomplete watcher (may delay first autocompletion)",
+                "type": "cycle",
+                "options": ["On", "Off"],
             },
         ]
 
@@ -85,19 +77,19 @@ class ConfigApp(Container):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="config-content"):
-            self.title_widget = Static("Settings", classes="settings-title")
+            self.title_widget = NoMarkupStatic("Settings", classes="settings-title")
             yield self.title_widget
 
-            yield Static("")
+            yield NoMarkupStatic("")
 
             for _ in self.settings:
-                widget = Static("", classes="settings-option")
+                widget = NoMarkupStatic("", classes="settings-option")
                 self.setting_widgets.append(widget)
                 yield widget
 
-            yield Static("")
+            yield NoMarkupStatic("")
 
-            self.help_widget = Static(
+            self.help_widget = NoMarkupStatic(
                 "↑↓ navigate  Space/Enter toggle  ESC exit", classes="settings-help"
             )
             yield self.help_widget
@@ -105,6 +97,15 @@ class ConfigApp(Container):
     def on_mount(self) -> None:
         self._update_display()
         self.focus()
+
+    def _get_display_value(self, setting: SettingDefinition) -> str:
+        key = setting["key"]
+        if key in self.changes:
+            return self.changes[key]
+        raw_value = getattr(self.config, key, "")
+        if isinstance(raw_value, bool):
+            return "On" if raw_value else "Off"
+        return str(raw_value)
 
     def _update_display(self) -> None:
         for i, (setting, widget) in enumerate(
@@ -114,7 +115,7 @@ class ConfigApp(Container):
             cursor = "› " if is_selected else "  "
 
             label: str = setting["label"]
-            value: str = self.changes.get(setting["key"], setting["value"])
+            value: str = self._get_display_value(setting)
 
             text = f"{cursor}{label}: {value}"
 
@@ -140,15 +141,16 @@ class ConfigApp(Container):
     def action_toggle_setting(self) -> None:
         setting = self.settings[self.selected_index]
         key: str = setting["key"]
-        current: str = self.changes.get(key, setting["value"])
+        current: str = self._get_display_value(setting)
 
         options: list[str] = setting["options"]
+        new_value = ""
         try:
             current_idx = options.index(current)
             next_idx = (current_idx + 1) % len(options)
-            new_value: str = options[next_idx]
+            new_value = options[next_idx]
         except (ValueError, IndexError):
-            new_value: str = options[0] if options else current
+            new_value = options[0] if options else current
 
         self.changes[key] = new_value
 
@@ -159,8 +161,17 @@ class ConfigApp(Container):
     def action_cycle(self) -> None:
         self.action_toggle_setting()
 
+    def _convert_changes_for_save(self) -> dict[str, str | bool]:
+        result: dict[str, str | bool] = {}
+        for key, value in self.changes.items():
+            if value in {"On", "Off"}:
+                result[key] = value == "On"
+            else:
+                result[key] = value
+        return result
+
     def action_close(self) -> None:
-        self.post_message(self.ConfigClosed(changes=self.changes.copy()))
+        self.post_message(self.ConfigClosed(changes=self._convert_changes_for_save()))
 
     def on_blur(self, event: events.Blur) -> None:
         self.call_after_refresh(self.focus)

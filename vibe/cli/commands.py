@@ -22,7 +22,7 @@ class CommandRegistry:
                 handler="_show_help",
             ),
             "config": Command(
-                aliases=frozenset(["/config", "/theme", "/model"]),
+                aliases=frozenset(["/config", "/model"]),
                 description="Edit config settings",
                 handler="_show_config",
             ),
@@ -62,6 +62,21 @@ class CommandRegistry:
                 description="Display agent statistics",
                 handler="_show_status",
             ),
+            "teleport": Command(
+                aliases=frozenset(["/teleport"]),
+                description="Teleport session to Vibe Nuage",
+                handler="_teleport_command",
+            ),
+            "proxy-setup": Command(
+                aliases=frozenset(["/proxy-setup"]),
+                description="Configure proxy and SSL certificate settings",
+                handler="_show_proxy_setup",
+            ),
+            "resume": Command(
+                aliases=frozenset(["/resume", "/continue"]),
+                description="Browse and resume past sessions",
+                handler="_show_session_picker",
+            ),
         }
 
         for command in excluded_commands:
@@ -73,8 +88,11 @@ class CommandRegistry:
                 self._alias_map[alias] = cmd_name
 
     def find_command(self, user_input: str) -> Command | None:
-        cmd_name = self._alias_map.get(user_input.lower().strip())
+        cmd_name = self.get_command_name(user_input)
         return self.commands.get(cmd_name) if cmd_name else None
+
+    def get_command_name(self, user_input: str) -> str | None:
+        return self._alias_map.get(user_input.lower().strip())
 
     def get_help_text(self) -> str:
         lines: list[str] = [
@@ -84,8 +102,8 @@ class CommandRegistry:
             "- `Ctrl+J` / `Shift+Enter` Insert newline",
             "- `Escape` Interrupt agent or close dialogs",
             "- `Ctrl+C` Quit (or clear input if text present)",
+            "- `Ctrl+G` Edit input in external editor",
             "- `Ctrl+O` Toggle tool output view",
-            "- `Ctrl+T` Toggle todo view",
             "- `Shift+Tab` Toggle auto-approve mode",
             "",
             "### Special Features",

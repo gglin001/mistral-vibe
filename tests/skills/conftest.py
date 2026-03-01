@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from vibe.core.config import SessionLoggingConfig, VibeConfig
+from tests.conftest import build_test_vibe_config
+from vibe.core.config import VibeConfig
 
 
 @pytest.fixture
@@ -18,8 +19,7 @@ def skills_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def skill_config(skills_dir: Path) -> VibeConfig:
-    return VibeConfig(
-        session_logging=SessionLoggingConfig(enabled=False),
+    return build_test_vibe_config(
         system_prompt_id="tests",
         include_project_context=False,
         skill_paths=[skills_dir],
@@ -35,6 +35,7 @@ def create_skill(
     compatibility: str | None = None,
     metadata: dict[str, str] | None = None,
     allowed_tools: str | None = None,
+    user_invocable: bool | None = None,
     body: str = "## Instructions\n\nTest instructions here.",
 ) -> Path:
     skill_dir = skills_dir / name
@@ -49,6 +50,8 @@ def create_skill(
         frontmatter["metadata"] = metadata
     if allowed_tools:
         frontmatter["allowed-tools"] = allowed_tools
+    if user_invocable is not None:
+        frontmatter["user-invocable"] = user_invocable
 
     yaml_str = yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)
     content = f"---\n{yaml_str}---\n\n{body}"

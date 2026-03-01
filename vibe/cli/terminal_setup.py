@@ -7,12 +7,14 @@ import os
 from pathlib import Path
 import platform
 import subprocess
-from typing import Any
+from typing import Any, Literal
 
 
 class Terminal(Enum):
     VSCODE = "vscode"
+    VSCODE_INSIDERS = "vscode_insiders"
     CURSOR = "cursor"
+    JETBRAINS = "jetbrains"
     ITERM2 = "iterm2"
     WEZTERM = "wezterm"
     GHOSTTY = "ghostty"
@@ -41,13 +43,31 @@ def _is_cursor() -> bool:
     return False
 
 
+def _detect_vscode_terminal() -> Literal[Terminal.VSCODE, Terminal.VSCODE_INSIDERS]:
+    term_version = os.environ.get("TERM_PROGRAM_VERSION", "").lower()
+    if term_version.endswith("-insider"):
+        return Terminal.VSCODE_INSIDERS
+
+    return Terminal.VSCODE
+
+
+def _detect_terminal_from_env() -> Terminal | None:
+    if os.environ.get("WEZTERM_PANE"):
+        return Terminal.WEZTERM
+    if os.environ.get("GHOSTTY_RESOURCES_DIR"):
+        return Terminal.GHOSTTY
+    if "jetbrains" in os.environ.get("TERMINAL_EMULATOR", "").lower():
+        return Terminal.JETBRAINS
+    return None
+
+
 def detect_terminal() -> Terminal:
     term_program = os.environ.get("TERM_PROGRAM", "").lower()
 
     if term_program == "vscode":
         if _is_cursor():
             return Terminal.CURSOR
-        return Terminal.VSCODE
+        return _detect_vscode_terminal()
 
     term_map = {
         "iterm.app": Terminal.ITERM2,
@@ -57,25 +77,22 @@ def detect_terminal() -> Terminal:
     if term_program in term_map:
         return term_map[term_program]
 
-    if os.environ.get("WEZTERM_PANE"):
-        return Terminal.WEZTERM
-    if os.environ.get("GHOSTTY_RESOURCES_DIR"):
-        return Terminal.GHOSTTY
-
-    return Terminal.UNKNOWN
+    return _detect_terminal_from_env() or Terminal.UNKNOWN
 
 
-def _get_vscode_keybindings_path() -> Path | None:
+def _get_vscode_keybindings_path(is_stable: bool) -> Path | None:
     system = platform.system()
 
+    app_name = "Code" if is_stable else "Code - Insiders"
+
     if system == "Darwin":
-        base = Path.home() / "Library" / "Application Support" / "Code" / "User"
+        base = Path.home() / "Library" / "Application Support" / app_name / "User"
     elif system == "Linux":
-        base = Path.home() / ".config" / "Code" / "User"
+        base = Path.home() / ".config" / app_name / "User"
     elif system == "Windows":
         appdata = os.environ.get("APPDATA", "")
         if appdata:
-            base = Path(appdata) / "Code" / "User"
+            base = Path(appdata) / app_name / "User"
         else:
             return None
     else:
@@ -118,13 +135,13 @@ def _parse_keybindings(content: str) -> list[dict[str, Any]]:
 
 
 def _setup_vscode_like_terminal(terminal: Terminal) -> SetupResult:
-    """Setup keybindings for VSCode or Cursor."""
+    """Setup keybindings for VS Code or Cursor."""
     if terminal == Terminal.CURSOR:
         keybindings_path = _get_cursor_keybindings_path()
         editor_name = "Cursor"
     else:
-        keybindings_path = _get_vscode_keybindings_path()
-        editor_name = "VSCode"
+        keybindings_path = _get_vscode_keybindings_path(terminal == Terminal.VSCODE)
+        editor_name = "VS Code" if terminal == Terminal.VSCODE else "VS Code Insiders"
 
     if keybindings_path is None:
         return SetupResult(
@@ -151,7 +168,9 @@ def _setup_vscode_like_terminal(terminal: Terminal) -> SetupResult:
             )
 
         keybindings.append(new_binding)
-        keybindings_path.write_text(json.dumps(keybindings, indent=2) + "\n")
+        keybindings_path.write_text(
+            json.dumps(keybindings, indent=2, ensure_ascii=False) + "\n"
+        )
 
         return SetupResult(
             success=True,
@@ -259,127 +278,44 @@ def _setup_iterm2() -> SetupResult:
 
 
 def _setup_wezterm() -> SetupResult:
-    wezterm_config = Path.home() / ".wezterm.lua"
-
-    key_binding = """{
-    key = "Enter",
-    mods = "SHIFT",
-    action = wezterm.action.SendString("\\x1b[13;2u"),
-  }"""
-
-    try:
-        if wezterm_config.exists():
-            content = wezterm_config.read_text()
-
-            if 'mods = "SHIFT"' in content and 'key = "Enter"' in content:
-                return SetupResult(
-                    success=True,
-                    terminal=Terminal.WEZTERM,
-                    message="Shift+Enter already configured in WezTerm",
-                )
-
-            if "keys = {" in content:
-                content = content.replace("keys = {", f"keys = {{\n  {key_binding},")
-            else:
-                return SetupResult(
-                    success=False,
-                    terminal=Terminal.WEZTERM,
-                    message="Please manually add the following to your .wezterm.lua:\n\n"
-                    f"  keys = {{\n    {key_binding}\n  }}",
-                )
-        else:
-            content = f"""local wezterm = require 'wezterm'
-
-return {{
-  keys = {{
-    {key_binding}
-  }},
-}}
-"""
-
-        wezterm_config.write_text(content)
-
-        return SetupResult(
-            success=True,
-            terminal=Terminal.WEZTERM,
-            message=f"Added Shift+Enter binding to {wezterm_config}",
-            requires_restart=True,
-        )
-
-    except Exception as e:
-        return SetupResult(
-            success=False,
-            terminal=Terminal.WEZTERM,
-            message=f"Failed to configure WezTerm: {e}",
-        )
+    return SetupResult(
+        success=True,
+        terminal=Terminal.WEZTERM,
+        message="Please manually add the following to your .wezterm.lua:\n"
+        "local wezterm = require 'wezterm'\n"
+        "local config = wezterm.config_builder()\n\n"
+        "config.keys = {\n"
+        "    {\n"
+        '        key = "Enter",\n'
+        '        mods = "SHIFT",\n'
+        '        action = wezterm.action.SendString("\\x1b[13;2u"),\n'
+        "    }\n"
+        "}\n\n"
+        "return config",
+    )
 
 
 def _setup_ghostty() -> SetupResult:
-    system = platform.system()
-
-    if system == "Darwin":
-        config_path = (
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "com.mitchellh.ghostty"
-            / "config"
-        )
-    elif system == "Linux":
-        xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-        config_path = Path(xdg_config) / "ghostty" / "config"
-    else:
-        return SetupResult(
-            success=False,
-            terminal=Terminal.GHOSTTY,
-            message="Ghostty configuration path unknown for this OS",
-        )
-
-    keybind_line = "keybind = shift+enter=text:\\x1b[13;2u"
-
-    try:
-        if config_path.exists():
-            content = config_path.read_text()
-
-            if "shift+enter" in content.lower():
-                return SetupResult(
-                    success=True,
-                    terminal=Terminal.GHOSTTY,
-                    message="Shift+Enter already configured in Ghostty",
-                )
-
-            if not content.endswith("\n"):
-                content += "\n"
-            content += keybind_line + "\n"
-        else:
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            content = keybind_line + "\n"
-
-        config_path.write_text(content)
-
-        return SetupResult(
-            success=True,
-            terminal=Terminal.GHOSTTY,
-            message=f"Added Shift+Enter binding to {config_path}",
-            requires_restart=True,
-        )
-
-    except Exception as e:
-        return SetupResult(
-            success=False,
-            terminal=Terminal.GHOSTTY,
-            message=f"Failed to configure Ghostty: {e}",
-        )
+    return SetupResult(
+        success=True,
+        terminal=Terminal.GHOSTTY,
+        message="Shift+Enter is already configured in Ghostty",
+    )
 
 
 def setup_terminal() -> SetupResult:
     terminal = detect_terminal()
 
     match terminal:
-        case Terminal.VSCODE:
-            return _setup_vscode_like_terminal(Terminal.VSCODE)
-        case Terminal.CURSOR:
-            return _setup_vscode_like_terminal(Terminal.CURSOR)
+        case Terminal.VSCODE | Terminal.VSCODE_INSIDERS | Terminal.CURSOR:
+            return _setup_vscode_like_terminal(terminal)
+        case Terminal.JETBRAINS:
+            return SetupResult(
+                success=False,
+                terminal=Terminal.JETBRAINS,
+                message="Jetbrains terminal is not supported.\n"
+                "You can manually configure Shift+Enter to send: \\x1b[13;2u",
+            )
         case Terminal.ITERM2:
             return _setup_iterm2()
         case Terminal.WEZTERM:
@@ -391,7 +327,7 @@ def setup_terminal() -> SetupResult:
                 success=False,
                 terminal=Terminal.UNKNOWN,
                 message="Could not detect terminal. Supported terminals:\n"
-                "- VSCode\n"
+                "- VS Code\n"
                 "- Cursor\n"
                 "- iTerm2\n"
                 "- WezTerm\n"

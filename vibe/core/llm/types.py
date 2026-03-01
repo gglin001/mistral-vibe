@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 import types
 from typing import TYPE_CHECKING, Protocol
 
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 class BackendLike(Protocol):
     """Port protocol for dependency-injectable LLM backends.
 
-    Any backend used by Agent should implement this async context manager
+    Any backend used by AgentLoop should implement this async context manager
     interface with `complete`, `complete_streaming` and `count_tokens` methods.
     """
 
@@ -29,12 +29,13 @@ class BackendLike(Protocol):
         self,
         *,
         model: ModelConfig,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         tools: list[AvailableTool] | None,
         max_tokens: int | None,
         tool_choice: StrToolChoice | AvailableTool | None,
         extra_headers: dict[str, str] | None,
+        metadata: dict[str, str] | None = None,
     ) -> LLMChunk:
         """Complete a chat conversation using the specified model and provider.
 
@@ -46,6 +47,7 @@ class BackendLike(Protocol):
             max_tokens: Maximum tokens to generate
             tool_choice: How to choose tools (auto, none, or specific tool)
             extra_headers: Additional HTTP headers to include
+            metadata: Optional metadata to attach to the request
 
         Returns:
             LLMChunk containing the response message and usage information
@@ -62,12 +64,13 @@ class BackendLike(Protocol):
         self,
         *,
         model: ModelConfig,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         tools: list[AvailableTool] | None,
         max_tokens: int | None,
         tool_choice: StrToolChoice | AvailableTool | None,
         extra_headers: dict[str, str] | None,
+        metadata: dict[str, str] | None = None,
     ) -> AsyncGenerator[LLMChunk, None]:
         """Equivalent of the complete method, but yields LLMEvent objects
         instead of a single LLMEvent.
@@ -80,6 +83,7 @@ class BackendLike(Protocol):
             max_tokens: Maximum tokens to generate
             tool_choice: How to choose tools (auto, none, or specific tool)
             extra_headers: Additional HTTP headers to include
+            metadata: Optional metadata to attach to the request
 
         Returns:
             AsyncGenerator[LLMEvent, None] yielding LLMEvent objects
@@ -93,11 +97,12 @@ class BackendLike(Protocol):
         self,
         *,
         model: ModelConfig,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float = 0.0,
         tools: list[AvailableTool] | None,
         tool_choice: StrToolChoice | AvailableTool | None = None,
         extra_headers: dict[str, str] | None,
+        metadata: dict[str, str] | None = None,
     ) -> int:
         """Count the number of tokens in the prompt without generating a real response.
 
@@ -113,6 +118,7 @@ class BackendLike(Protocol):
             tools: Optional list of available tools
             tool_choice: How to choose tools
             extra_headers: Additional HTTP headers to include
+            metadata: Optional metadata to attach to the request
 
         Returns:
             The number of prompt tokens

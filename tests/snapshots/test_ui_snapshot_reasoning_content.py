@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from textual.pilot import Pilot
 
+from tests.conftest import build_test_agent_loop
 from tests.mock.utils import mock_llm_chunk
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
 from tests.snapshots.snap_compare import SnapCompare
 from tests.stubs.fake_backend import FakeBackend
 from vibe.cli.textual_ui.widgets.messages import ReasoningMessage
-from vibe.core.agent import Agent
 
 
 class SnapshotTestAppWithReasoningContent(BaseSnapshotTestApp):
@@ -31,9 +31,9 @@ class SnapshotTestAppWithReasoningContent(BaseSnapshotTestApp):
             ]
         )
         super().__init__(config=config)
-        self.agent = Agent(
-            config,
-            mode=self._current_agent_mode,
+        self.agent_loop = build_test_agent_loop(
+            config=config,
+            agent_name=self._current_agent_name,
             enable_streaming=True,
             backend=fake_backend,
         )
@@ -57,9 +57,9 @@ class SnapshotTestAppWithInterleavedReasoning(BaseSnapshotTestApp):
             ]
         )
         super().__init__(config=config)
-        self.agent = Agent(
-            config,
-            mode=self._current_agent_mode,
+        self.agent_loop = build_test_agent_loop(
+            config=config,
+            agent_name=self._current_agent_name,
             enable_streaming=True,
             backend=fake_backend,
         )
@@ -123,9 +123,9 @@ class SnapshotTestAppWithBufferedReasoningTransition(BaseSnapshotTestApp):
             ]
         )
         super().__init__(config=config)
-        self.agent = Agent(
-            config,
-            mode=self._current_agent_mode,
+        self.agent_loop = build_test_agent_loop(
+            config=config,
+            agent_name=self._current_agent_name,
             enable_streaming=True,
             backend=fake_backend,
         )

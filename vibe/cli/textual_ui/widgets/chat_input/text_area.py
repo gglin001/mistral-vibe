@@ -8,11 +8,12 @@ from textual.message import Message
 from textual.widgets import TextArea
 
 from vibe.cli.autocompletion.base import CompletionResult
+from vibe.cli.textual_ui.external_editor import ExternalEditor
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
 
-InputMode = Literal["!", "/", ">"]
+InputMode = Literal["!", "/", ">", "&"]
 
 
 class ChatTextArea(TextArea):
@@ -23,10 +24,10 @@ class ChatTextArea(TextArea):
             "New Line",
             show=False,
             priority=True,
-        )
+        ),
+        Binding("ctrl+g", "open_external_editor", "External Editor", show=False),
     ]
 
-    MODE_CHARACTERS: ClassVar[set[Literal["!", "/"]]] = {"!", "/"}
     DEFAULT_MODE: ClassVar[Literal[">"]] = ">"
 
     class Submitted(Message):
@@ -48,14 +49,15 @@ class ChatTextArea(TextArea):
         """Message sent when history navigation should be reset."""
 
     class ModeChanged(Message):
-        """Message sent when the input mode changes (>, !, /)."""
+        """Message sent when the input mode changes (>, !, /, &)."""
 
         def __init__(self, mode: InputMode) -> None:
             self.mode = mode
             super().__init__()
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, nuage_enabled: bool = False, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        self._nuage_enabled = nuage_enabled
         self._input_mode: InputMode = self.DEFAULT_MODE
         self._history_prefix: str | None = None
         self._last_text = ""
@@ -83,6 +85,17 @@ class ChatTextArea(TextArea):
 
     def action_insert_newline(self) -> None:
         self.insert("\n")
+
+    def action_open_external_editor(self) -> None:
+        editor = ExternalEditor()
+        current_text = self.get_full_text()
+
+        with self.app.suspend():
+            result = editor.edit(current_text)
+
+        if result is not None:
+            self.clear()
+            self.insert(result)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if not self._navigating_history and self.text != self._last_text:
@@ -200,7 +213,7 @@ class ChatTextArea(TextArea):
 
         if (
             event.character
-            and event.character in self.MODE_CHARACTERS
+            and event.character in self.mode_characters
             and not self.text
             and self._input_mode == self.DEFAULT_MODE
         ):
@@ -315,7 +328,14 @@ class ChatTextArea(TextArea):
         return self.get_cursor_offset() + self._get_mode_prefix_length()
 
     def _get_mode_prefix_length(self) -> int:
-        return {">": 0, "/": 1, "!": 1}[self._input_mode]
+        return {">": 0, "/": 1, "!": 1, "&": 1}[self._input_mode]
+
+    @property
+    def mode_characters(self) -> set[InputMode]:
+        chars: set[InputMode] = {"!", "/"}
+        if self._nuage_enabled:
+            chars.add("&")
+        return chars
 
     @property
     def input_mode(self) -> InputMode:

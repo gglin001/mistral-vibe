@@ -4,13 +4,15 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Markdown, Static
+from textual.widgets import Static
 from textual.widgets._markdown import MarkdownStream
 
+from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown as Markdown
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 
-class NonSelectableStatic(Static):
+class NonSelectableStatic(NoMarkupStatic):
     @property
     def text_selection(self) -> None:
         return None
@@ -41,8 +43,7 @@ class UserMessage(Static):
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="user-message-container"):
-            yield NonSelectableStatic("> ", classes="user-message-prompt")
-            yield Static(self._content, markup=False, classes="user-message-content")
+            yield NoMarkupStatic(self._content, classes="user-message-content")
             if self._pending:
                 self.add_class("pending")
 
@@ -65,6 +66,7 @@ class StreamingMessageBase(Static):
         self._content = content
         self._markdown: Markdown | None = None
         self._stream: MarkdownStream | None = None
+        self._content_initialized = False
 
     def _get_markdown(self) -> Markdown:
         if self._markdown is None:
@@ -88,6 +90,8 @@ class StreamingMessageBase(Static):
             await stream.write(content)
 
     async def write_initial_content(self) -> None:
+        if self._content_initialized:
+            return
         if self._content and self._should_write_content():
             stream = self._ensure_stream()
             await stream.write(self._content)
@@ -102,6 +106,9 @@ class StreamingMessageBase(Static):
     def _should_write_content(self) -> bool:
         return True
 
+    def is_stripped_content_empty(self) -> bool:
+        return self._content.strip() == ""
+
 
 class AssistantMessage(StreamingMessageBase):
     def __init__(self, content: str) -> None:
@@ -109,16 +116,15 @@ class AssistantMessage(StreamingMessageBase):
         self.add_class("assistant-message")
 
     def compose(self) -> ComposeResult:
-        with Horizontal(classes="assistant-message-container"):
-            yield NonSelectableStatic("● ", classes="assistant-message-dot")
-            with Vertical(classes="assistant-message-content"):
-                markdown = Markdown("")
-                self._markdown = markdown
-                yield markdown
+        if self._content:
+            self._content_initialized = True
+        markdown = Markdown(self._content)
+        self._markdown = markdown
+        yield markdown
 
 
 class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
-    SPINNER_TYPE = SpinnerType.LINE
+    SPINNER_TYPE = SpinnerType.PULSE
     SPINNING_TEXT = "Thinking"
     COMPLETED_TEXT = "Thought"
 
@@ -137,8 +143,8 @@ class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
                     self._spinner.current_frame(), classes="reasoning-indicator"
                 )
                 yield self._indicator_widget
-                self._status_text_widget = Static(
-                    self.SPINNING_TEXT, markup=False, classes="reasoning-collapsed-text"
+                self._status_text_widget = NoMarkupStatic(
+                    self.SPINNING_TEXT, classes="reasoning-collapsed-text"
                 )
                 yield self._status_text_widget
                 self._triangle_widget = NonSelectableStatic(
@@ -196,6 +202,16 @@ class UserCommandMessage(Static):
                 yield Markdown(self._content)
 
 
+class WhatsNewMessage(Static):
+    def __init__(self, content: str) -> None:
+        super().__init__()
+        self.add_class("whats-new-message")
+        self._content = content
+
+    def compose(self) -> ComposeResult:
+        yield Markdown(self._content)
+
+
 class InterruptMessage(Static):
     def __init__(self) -> None:
         super().__init__()
@@ -204,9 +220,8 @@ class InterruptMessage(Static):
     def compose(self) -> ComposeResult:
         with Horizontal(classes="interrupt-container"):
             yield ExpandingBorder(classes="interrupt-border")
-            yield Static(
+            yield NoMarkupStatic(
                 "Interrupted · What should Vibe do instead?",
-                markup=False,
                 classes="interrupt-content",
             )
 
@@ -217,28 +232,22 @@ class BashOutputMessage(Static):
         self.add_class("bash-output-message")
         self._command = command
         self._cwd = cwd
-        self._output = output
+        self._output = output.rstrip("\n")
         self._exit_code = exit_code
 
     def compose(self) -> ComposeResult:
-        with Vertical(classes="bash-output-container"):
-            with Horizontal(classes="bash-cwd-line"):
-                yield Static(self._cwd, markup=False, classes="bash-cwd")
-                yield Static("", classes="bash-cwd-spacer")
-                if self._exit_code == 0:
-                    yield Static("✓", classes="bash-exit-success")
-                else:
-                    yield Static("✗", classes="bash-exit-failure")
-                    yield Static(f" ({self._exit_code})", classes="bash-exit-code")
-            with Horizontal(classes="bash-command-line"):
-                yield Static("> ", classes="bash-chevron")
-                yield Static(self._command, markup=False, classes="bash-command")
-                yield Static("", classes="bash-command-spacer")
-            yield Static(self._output, markup=False, classes="bash-output")
+        status_class = "bash-success" if self._exit_code == 0 else "bash-error"
+        self.add_class(status_class)
+        with Horizontal(classes="bash-command-line"):
+            yield NonSelectableStatic("$ ", classes=f"bash-prompt {status_class}")
+            yield NoMarkupStatic(self._command, classes="bash-command")
+        with Horizontal(classes="bash-output-container"):
+            yield ExpandingBorder(classes="bash-output-border")
+            yield NoMarkupStatic(self._output, classes="bash-output")
 
 
 class ErrorMessage(Static):
-    def __init__(self, error: str, collapsed: bool = True) -> None:
+    def __init__(self, error: str, collapsed: bool = False) -> None:
         super().__init__()
         self.add_class("error-message")
         self._error = error
@@ -248,23 +257,13 @@ class ErrorMessage(Static):
     def compose(self) -> ComposeResult:
         with Horizontal(classes="error-container"):
             yield ExpandingBorder(classes="error-border")
-            self._content_widget = Static(
-                self._get_text(), markup=False, classes="error-content"
+            self._content_widget = NoMarkupStatic(
+                f"Error: {self._error}", classes="error-content"
             )
             yield self._content_widget
 
-    def _get_text(self) -> str:
-        if self.collapsed:
-            return "Error. (ctrl+o to expand)"
-        return f"Error: {self._error}"
-
     def set_collapsed(self, collapsed: bool) -> None:
-        if self.collapsed == collapsed:
-            return
-
-        self.collapsed = collapsed
-        if self._content_widget:
-            self._content_widget.update(self._get_text())
+        pass
 
 
 class WarningMessage(Static):
@@ -278,4 +277,4 @@ class WarningMessage(Static):
         with Horizontal(classes="warning-container"):
             if self._show_border:
                 yield ExpandingBorder(classes="warning-border")
-            yield Static(self._message, markup=False, classes="warning-content")
+            yield NoMarkupStatic(self._message, classes="warning-content")

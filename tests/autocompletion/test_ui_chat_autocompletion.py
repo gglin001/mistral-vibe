@@ -10,17 +10,6 @@ from textual.widgets import Markdown
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
-from vibe.core.config import SessionLoggingConfig, VibeConfig
-
-
-@pytest.fixture
-def vibe_config() -> VibeConfig:
-    return VibeConfig(session_logging=SessionLoggingConfig(enabled=False))
-
-
-@pytest.fixture
-def vibe_app(vibe_config: VibeConfig) -> VibeApp:
-    return VibeApp(config=vibe_config)
 
 
 @pytest.mark.asyncio
@@ -60,7 +49,7 @@ async def test_pressing_tab_writes_selected_command_and_keeps_popup_visible(
         await pilot.press(*"/co")
         await pilot.press("tab")
 
-        assert chat_input.value == "/config"
+        assert chat_input.value == "/compact"
         assert popup.styles.display == "block"
 
 
@@ -88,11 +77,11 @@ async def test_arrow_navigation_updates_selected_suggestion(vibe_app: VibeApp) -
 
         await pilot.press(*"/c")
 
-        ensure_selected_command(popup, "/config")
-        await pilot.press("down")
         ensure_selected_command(popup, "/clear")
+        await pilot.press("down")
+        ensure_selected_command(popup, "/compact")
         await pilot.press("up")
-        ensure_selected_command(popup, "/config")
+        ensure_selected_command(popup, "/clear")
 
 
 @pytest.mark.asyncio
@@ -102,16 +91,16 @@ async def test_arrow_navigation_cycles_through_suggestions(vibe_app: VibeApp) ->
 
         await pilot.press(*"/co")
 
-        ensure_selected_command(popup, "/config")
-        await pilot.press("down")
         ensure_selected_command(popup, "/compact")
-        await pilot.press("up")
+        await pilot.press("down")
         ensure_selected_command(popup, "/config")
+        await pilot.press("up")
+        ensure_selected_command(popup, "/compact")
 
 
 @pytest.mark.asyncio
 async def test_pressing_enter_submits_selected_command_and_hides_popup(
-    vibe_app: VibeApp,
+    vibe_app: VibeApp, telemetry_events: list[dict]
 ) -> None:
     async with vibe_app.run_test() as pilot:
         chat_input = vibe_app.query_one(ChatInputContainer)
@@ -125,6 +114,17 @@ async def test_pressing_enter_submits_selected_command_and_hides_popup(
         message = vibe_app.query_one(".user-command-message")
         message_content = message.query_one(Markdown)
         assert "Show help message" in message_content.source
+
+        slash_used = [
+            e
+            for e in telemetry_events
+            if e.get("event_name") == "vibe.slash_command_used"
+        ]
+        assert any(
+            e.get("properties", {}).get("command") == "help"
+            and e.get("properties", {}).get("command_type") == "builtin"
+            for e in slash_used
+        )
 
 
 @pytest.fixture()

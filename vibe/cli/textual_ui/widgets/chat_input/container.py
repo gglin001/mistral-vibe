@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -16,13 +17,13 @@ from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
 )
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
+from vibe.core.agents import AgentSafety
 from vibe.core.autocompletion.completers import CommandCompleter, PathCompleter
-from vibe.core.modes import ModeSafety
 
-SAFETY_BORDER_CLASSES: dict[ModeSafety, str] = {
-    ModeSafety.SAFE: "border-safe",
-    ModeSafety.DESTRUCTIVE: "border-warning",
-    ModeSafety.YOLO: "border-error",
+SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
+    AgentSafety.SAFE: "border-safe",
+    AgentSafety.DESTRUCTIVE: "border-warning",
+    AgentSafety.YOLO: "border-error",
 }
 
 
@@ -38,34 +39,58 @@ class ChatInputContainer(Vertical):
         self,
         history_file: Path | None = None,
         command_registry: CommandRegistry | None = None,
-        safety: ModeSafety = ModeSafety.NEUTRAL,
+        safety: AgentSafety = AgentSafety.NEUTRAL,
+        agent_name: str = "",
+        skill_entries_getter: Callable[[], list[tuple[str, str]]] | None = None,
+        file_watcher_for_autocomplete_getter: Callable[[], bool] | None = None,
+        nuage_enabled: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._history_file = history_file
         self._command_registry = command_registry or CommandRegistry()
         self._safety = safety
+        self._agent_name = agent_name
+        self._skill_entries_getter = skill_entries_getter
+        self._file_watcher_for_autocomplete_getter = (
+            file_watcher_for_autocomplete_getter
+        )
+        self._nuage_enabled = nuage_enabled
 
-        command_entries = [
+        self._completion_manager = MultiCompletionManager([
+            SlashCommandController(CommandCompleter(self._get_slash_entries), self),
+            PathCompletionController(
+                PathCompleter(
+                    watcher_enabled_getter=self._file_watcher_for_autocomplete_getter
+                ),
+                self,
+            ),
+        ])
+        self._completion_popup: CompletionPopup | None = None
+        self._body: ChatInputBody | None = None
+
+    def _get_slash_entries(self) -> list[tuple[str, str]]:
+        entries = [
             (alias, command.description)
             for command in self._command_registry.commands.values()
             for alias in sorted(command.aliases)
         ]
-
-        self._completion_manager = MultiCompletionManager([
-            SlashCommandController(CommandCompleter(command_entries), self),
-            PathCompletionController(PathCompleter(), self),
-        ])
-        self._completion_popup: CompletionPopup | None = None
-        self._body: ChatInputBody | None = None
+        if self._skill_entries_getter:
+            entries.extend(self._skill_entries_getter())
+        return sorted(entries)
 
     def compose(self) -> ComposeResult:
         self._completion_popup = CompletionPopup()
         yield self._completion_popup
 
         border_class = SAFETY_BORDER_CLASSES.get(self._safety, "")
-        with Vertical(id=self.ID_INPUT_BOX, classes=border_class):
-            self._body = ChatInputBody(history_file=self._history_file, id="input-body")
+        with Vertical(id=self.ID_INPUT_BOX, classes=border_class) as input_box:
+            input_box.border_title = self._agent_name
+            self._body = ChatInputBody(
+                history_file=self._history_file,
+                id="input-body",
+                nuage_enabled=self._nuage_enabled,
+            )
 
             yield self._body
 
@@ -155,7 +180,16 @@ class ChatInputContainer(Vertical):
         event.stop()
         self.post_message(self.Submitted(event.value))
 
-    def set_safety(self, safety: ModeSafety) -> None:
+    @property
+    def switching_mode(self) -> bool:
+        return self._body.switching_mode if self._body else False
+
+    @switching_mode.setter
+    def switching_mode(self, value: bool) -> None:
+        if self._body:
+            self._body.switching_mode = value
+
+    def set_safety(self, safety: AgentSafety) -> None:
         self._safety = safety
 
         try:
@@ -168,3 +202,12 @@ class ChatInputContainer(Vertical):
 
         if safety in SAFETY_BORDER_CLASSES:
             input_box.add_class(SAFETY_BORDER_CLASSES[safety])
+
+    def set_agent_name(self, name: str) -> None:
+        self._agent_name = name
+
+        try:
+            input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
+            input_box.border_title = name
+        except Exception:
+            pass

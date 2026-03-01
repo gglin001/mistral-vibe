@@ -3,32 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from acp import AgentSideConnection, NewSessionRequest, SetSessionModelRequest
 import pytest
 
-from tests.stubs.fake_backend import FakeBackend
-from tests.stubs.fake_connection import FakeAgentSideConnection
-from vibe.acp.acp_agent import VibeAcpAgent
-from vibe.core.agent import Agent
-from vibe.core.config import ModelConfig, VibeConfig
-from vibe.core.modes import AgentMode
-from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
+from tests.acp.conftest import _create_acp_agent
+from tests.conftest import build_test_vibe_config
+from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
+from vibe.core.agent_loop import AgentLoop
+from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.config import ModelConfig
 
 
 @pytest.fixture
-def backend() -> FakeBackend:
-    backend = FakeBackend(
-        LLMChunk(
-            message=LLMMessage(role=Role.assistant, content="Hi"),
-            usage=LLMUsage(prompt_tokens=1, completion_tokens=1),
-        )
-    )
-    return backend
-
-
-@pytest.fixture
-def acp_agent(backend: FakeBackend) -> VibeAcpAgent:
-    config = VibeConfig(
+def acp_agent_loop(backend) -> VibeAcpAgentLoop:
+    config = build_test_vibe_config(
         active_model="devstral-latest",
         models=[
             ModelConfig(
@@ -40,101 +27,125 @@ def acp_agent(backend: FakeBackend) -> VibeAcpAgent:
         ],
     )
 
-    class PatchedAgent(Agent):
+    class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self.config = config
+            self._base_config = config
+            self.agent_manager.invalidate_config()
 
-    patch("vibe.acp.acp_agent.VibeAgent", side_effect=PatchedAgent).start()
+    patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgentLoop).start()
 
-    vibe_acp_agent: VibeAcpAgent | None = None
-
-    def _create_agent(connection: AgentSideConnection) -> VibeAcpAgent:
-        nonlocal vibe_acp_agent
-        vibe_acp_agent = VibeAcpAgent(connection)
-        return vibe_acp_agent
-
-    FakeAgentSideConnection(_create_agent)
-    return vibe_acp_agent  # pyright: ignore[reportReturnType]
+    return _create_acp_agent()
 
 
 class TestACPNewSession:
     @pytest.mark.asyncio
     async def test_new_session_response_structure(
-        self, acp_agent: VibeAcpAgent
+        self, acp_agent_loop: VibeAcpAgentLoop, telemetry_events: list[dict]
     ) -> None:
-        session_response = await acp_agent.newSession(
-            NewSessionRequest(cwd=str(Path.cwd()), mcpServers=[])
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
         )
 
-        assert session_response.sessionId is not None
+        new_session_events = [
+            e for e in telemetry_events if e.get("event_name") == "vibe.new_session"
+        ]
+        assert len(new_session_events) == 1
+        assert new_session_events[0]["properties"]["entrypoint"] == "acp"
+
+        assert session_response.session_id is not None
         acp_session = next(
             (
                 s
-                for s in acp_agent.sessions.values()
-                if s.id == session_response.sessionId
+                for s in acp_agent_loop.sessions.values()
+                if s.id == session_response.session_id
             ),
             None,
         )
         assert acp_session is not None
         assert (
-            acp_session.agent.interaction_logger.session_id
-            == session_response.sessionId
+            acp_session.agent_loop.session_logger.session_id
+            == session_response.session_id
         )
 
-        assert session_response.sessionId == acp_session.agent.session_id
+        assert session_response.session_id == acp_session.agent_loop.session_id
 
         assert session_response.models is not None
-        assert session_response.models.currentModelId is not None
-        assert session_response.models.availableModels is not None
-        assert len(session_response.models.availableModels) == 2
+        assert session_response.models.current_model_id is not None
+        assert session_response.models.available_models is not None
+        assert len(session_response.models.available_models) == 2
 
-        assert session_response.models.currentModelId == "devstral-latest"
-        assert session_response.models.availableModels[0].modelId == "devstral-latest"
-        assert session_response.models.availableModels[0].name == "devstral-latest"
-        assert session_response.models.availableModels[1].modelId == "devstral-small"
-        assert session_response.models.availableModels[1].name == "devstral-small"
+        assert session_response.models.current_model_id == "devstral-latest"
+        assert session_response.models.available_models[0].model_id == "devstral-latest"
+        assert session_response.models.available_models[0].name == "devstral-latest"
+        assert session_response.models.available_models[1].model_id == "devstral-small"
+        assert session_response.models.available_models[1].name == "devstral-small"
 
         assert session_response.modes is not None
-        assert session_response.modes.currentModeId is not None
-        assert session_response.modes.availableModes is not None
-        assert len(session_response.modes.availableModes) == 4
+        assert session_response.modes.current_mode_id is not None
+        assert session_response.modes.available_modes is not None
+        assert len(session_response.modes.available_modes) == 5
 
-        assert session_response.modes.currentModeId == AgentMode.DEFAULT.value
-        assert session_response.modes.availableModes[0].id == AgentMode.DEFAULT.value
-        assert session_response.modes.availableModes[0].name == "Default"
-        assert (
-            session_response.modes.availableModes[1].id == AgentMode.AUTO_APPROVE.value
-        )
-        assert session_response.modes.availableModes[1].name == "Auto Approve"
-        assert session_response.modes.availableModes[2].id == AgentMode.PLAN.value
-        assert session_response.modes.availableModes[2].name == "Plan"
-        assert (
-            session_response.modes.availableModes[3].id == AgentMode.ACCEPT_EDITS.value
-        )
-        assert session_response.modes.availableModes[3].name == "Accept Edits"
+        assert session_response.modes.current_mode_id == BuiltinAgentName.DEFAULT
+        # Check that all primary agents are available (order may vary)
+        mode_ids = {m.id for m in session_response.modes.available_modes}
+        assert mode_ids == {
+            BuiltinAgentName.DEFAULT,
+            BuiltinAgentName.CHAT,
+            BuiltinAgentName.AUTO_APPROVE,
+            BuiltinAgentName.PLAN,
+            BuiltinAgentName.ACCEPT_EDITS,
+        }
+
+        # Check config_options
+        assert session_response.config_options is not None
+        assert len(session_response.config_options) == 2
+
+        # Mode config option
+        mode_config = session_response.config_options[0]
+        assert mode_config.root.id == "mode"
+        assert mode_config.root.category == "mode"
+        assert mode_config.root.current_value == BuiltinAgentName.DEFAULT
+        assert len(mode_config.root.options) == 5
+        mode_option_values = {opt.value for opt in mode_config.root.options}
+        assert mode_option_values == {
+            BuiltinAgentName.DEFAULT,
+            BuiltinAgentName.CHAT,
+            BuiltinAgentName.AUTO_APPROVE,
+            BuiltinAgentName.PLAN,
+            BuiltinAgentName.ACCEPT_EDITS,
+        }
+
+        # Model config option
+        model_config = session_response.config_options[1]
+        assert model_config.root.id == "model"
+        assert model_config.root.category == "model"
+        assert model_config.root.current_value == "devstral-latest"
+        assert len(model_config.root.options) == 2
+        model_option_values = {opt.value for opt in model_config.root.options}
+        assert model_option_values == {"devstral-latest", "devstral-small"}
 
     @pytest.mark.skip(reason="TODO: Fix this test")
     @pytest.mark.asyncio
     async def test_new_session_preserves_model_after_set_model(
-        self, acp_agent: VibeAcpAgent
+        self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
-        session_response = await acp_agent.newSession(
-            NewSessionRequest(cwd=str(Path.cwd()), mcpServers=[])
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
         )
-        session_id = session_response.sessionId
+        session_id = session_response.session_id
 
         assert session_response.models is not None
-        assert session_response.models.currentModelId == "devstral-latest"
+        assert session_response.models.current_model_id == "devstral-latest"
 
-        response = await acp_agent.setSessionModel(
-            SetSessionModelRequest(sessionId=session_id, modelId="devstral-small")
+        response = await acp_agent_loop.set_session_model(
+            session_id=session_id, model_id="devstral-small"
         )
         assert response is not None
 
-        session_response = await acp_agent.newSession(
-            NewSessionRequest(cwd=str(Path.cwd()), mcpServers=[])
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
         )
 
         assert session_response.models is not None
-        assert session_response.models.currentModelId == "devstral-small"
+        assert session_response.models.current_model_id == "devstral-small"

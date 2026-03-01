@@ -1,22 +1,26 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, NamedTuple, final
 
-import aiofiles
+import anyio
 from pydantic import BaseModel, Field
 
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
     BaseToolState,
+    InvokeContext,
     ToolError,
     ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.tools.utils import resolve_file_tool_permission
+from vibe.core.types import ToolStreamEvent
 
 if TYPE_CHECKING:
-    from vibe.core.types import ToolCallEvent, ToolResultEvent
+    from vibe.core.types import ToolResultEvent
 
 
 class _ReadResult(NamedTuple):
@@ -51,17 +55,10 @@ class ReadFileToolConfig(BaseToolConfig):
     max_read_bytes: int = Field(
         default=64_000, description="Maximum total bytes to read from a file in one go."
     )
-    max_state_history: int = Field(
-        default=10, description="Number of recently read files to remember in state."
-    )
-
-
-class ReadFileState(BaseToolState):
-    recently_read_files: list[str] = Field(default_factory=list)
 
 
 class ReadFile(
-    BaseTool[ReadFileArgs, ReadFileResult, ReadFileToolConfig, ReadFileState],
+    BaseTool[ReadFileArgs, ReadFileResult, ReadFileToolConfig, BaseToolState],
     ToolUIData[ReadFileArgs, ReadFileResult],
 ):
     description: ClassVar[str] = (
@@ -70,44 +67,34 @@ class ReadFile(
     )
 
     @final
-    async def run(self, args: ReadFileArgs) -> ReadFileResult:
+    async def run(
+        self, args: ReadFileArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[ToolStreamEvent | ReadFileResult, None]:
         file_path = self._prepare_and_validate_path(args)
 
         read_result = await self._read_file(args, file_path)
 
-        self._update_state_history(file_path)
-
-        return ReadFileResult(
+        yield ReadFileResult(
             path=str(file_path),
             content="".join(read_result.lines),
             lines_read=len(read_result.lines),
             was_truncated=read_result.was_truncated,
         )
 
-    def check_allowlist_denylist(self, args: ReadFileArgs) -> ToolPermission | None:
-        import fnmatch
-
-        file_path = Path(args.path).expanduser()
-        if not file_path.is_absolute():
-            file_path = self.config.effective_workdir / file_path
-        file_str = str(file_path)
-
-        for pattern in self.config.denylist:
-            if fnmatch.fnmatch(file_str, pattern):
-                return ToolPermission.NEVER
-
-        for pattern in self.config.allowlist:
-            if fnmatch.fnmatch(file_str, pattern):
-                return ToolPermission.ALWAYS
-
-        return None
+    def resolve_permission(self, args: ReadFileArgs) -> ToolPermission | None:
+        return resolve_file_tool_permission(
+            args.path,
+            allowlist=self.config.allowlist,
+            denylist=self.config.denylist,
+            config_permission=self.config.permission,
+        )
 
     def _prepare_and_validate_path(self, args: ReadFileArgs) -> Path:
         self._validate_inputs(args)
 
         file_path = Path(args.path).expanduser()
         if not file_path.is_absolute():
-            file_path = self.config.effective_workdir / file_path
+            file_path = Path.cwd() / file_path
 
         self._validate_path(file_path)
         return file_path
@@ -118,7 +105,9 @@ class ReadFile(
             bytes_read = 0
             was_truncated = False
 
-            async with aiofiles.open(file_path, encoding="utf-8", errors="ignore") as f:
+            async with await anyio.Path(file_path).open(
+                encoding="utf-8", errors="ignore"
+            ) as f:
                 line_index = 0
                 async for line in f:
                     if line_index < args.offset:
@@ -159,7 +148,7 @@ class ReadFile(
             resolved_path = file_path.resolve()
         except ValueError:
             raise ToolError(
-                f"Security error: Cannot read path '{file_path}' outside of the project directory '{self.config.effective_workdir}'."
+                f"Security error: Cannot read path '{file_path}' outside of the project directory '{Path.cwd()}'."
             )
         except FileNotFoundError:
             raise ToolError(f"File not found at: {file_path}")
@@ -169,25 +158,16 @@ class ReadFile(
         if resolved_path.is_dir():
             raise ToolError(f"Path is a directory, not a file: {file_path}")
 
-    def _update_state_history(self, file_path: Path) -> None:
-        self.state.recently_read_files.append(str(file_path.resolve()))
-        if len(self.state.recently_read_files) > self.config.max_state_history:
-            self.state.recently_read_files.pop(0)
-
     @classmethod
-    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-        if not isinstance(event.args, ReadFileArgs):
-            return ToolCallDisplay(summary="read_file")
-
-        summary = f"read_file: {event.args.path}"
-        if event.args.offset > 0 or event.args.limit is not None:
+    def format_call_display(cls, args: ReadFileArgs) -> ToolCallDisplay:
+        summary = f"Reading {args.path}"
+        if args.offset > 0 or args.limit is not None:
             parts = []
-            if event.args.offset > 0:
-                parts.append(f"from line {event.args.offset}")
-            if event.args.limit is not None:
-                parts.append(f"limit {event.args.limit} lines")
+            if args.offset > 0:
+                parts.append(f"from line {args.offset}")
+            if args.limit is not None:
+                parts.append(f"limit {args.limit} lines")
             summary += f" ({', '.join(parts)})"
-
         return ToolCallDisplay(summary=summary)
 
     @classmethod
