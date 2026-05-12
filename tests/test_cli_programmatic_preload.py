@@ -7,8 +7,7 @@ from tests.mock.mock_backend_factory import mock_backend_factory
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core import run_programmatic
-from vibe.core.config import Backend
-from vibe.core.types import LLMMessage, OutputFormat, Role
+from vibe.core.types import Backend, LLMMessage, OutputFormat, Role
 
 
 class SpyStreamingFormatter:
@@ -81,9 +80,14 @@ def test_run_programmatic_preload_streaming_is_batched(
         new_session = [
             e for e in telemetry_events if e.get("event_name") == "vibe.new_session"
         ]
-        assert len(new_session) == 1
-        assert new_session[0]["properties"]["entrypoint"] == "programmatic"
-        assert "version" in new_session[0]["properties"]
+
+        assert len(new_session) == 0
+
+        session_closed = [
+            e for e in telemetry_events if e.get("event_name") == "vibe.session_closed"
+        ]
+        assert len(session_closed) == 1
+        assert session_closed[0]["properties"]["agent_entrypoint"] == "programmatic"
 
         assert (
             spy.emitted[0][1] == "You are Vibe, a super useful programming assistant."
@@ -142,3 +146,38 @@ def test_run_programmatic_ignores_system_messages_in_previous(
         assert spy.emitted[1][1] == "Continue our previous discussion."
         assert spy.emitted[2][1] == "Let's move on to practical examples."
         assert spy.emitted[3][1] == "Understood."
+
+
+def test_run_programmatic_teleport_ignored_when_nuage_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spy = SpyStreamingFormatter()
+    monkeypatch.setattr(
+        "vibe.core.programmatic.create_formatter", lambda *_args, **_kwargs: spy
+    )
+
+    with mock_backend_factory(
+        Backend.MISTRAL,
+        lambda provider, **kwargs: FakeBackend([
+            mock_llm_chunk(content="Normal response.")
+        ]),
+    ):
+        cfg = build_test_vibe_config(
+            system_prompt_id="tests",
+            include_project_context=False,
+            include_prompt_detail=False,
+            include_model_info=False,
+            include_commit_signature=False,
+            vibe_code_enabled=False,
+        )
+
+        run_programmatic(
+            config=cfg,
+            prompt="Hello",
+            output_format=OutputFormat.STREAMING,
+            teleport=True,
+        )
+
+        roles = [r for r, _ in spy.emitted]
+        assert roles == [Role.system, Role.user, Role.assistant]
+        assert spy.emitted[2][1] == "Normal response."

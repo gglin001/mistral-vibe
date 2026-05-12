@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, ClassVar, NamedTuple, final
 import anyio
 from pydantic import BaseModel, Field
 
+from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -15,9 +17,12 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils import VIBE_WARNING_TAG
+from vibe.core.utils.io import decode_safe
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -43,6 +48,7 @@ class ReadFileArgs(BaseModel):
 class ReadFileResult(BaseModel):
     path: str
     content: str
+    offset: int = 0
     lines_read: int
     was_truncated: bool = Field(
         description="True if the reading was stopped due to the max_read_bytes limit."
@@ -51,19 +57,27 @@ class ReadFileResult(BaseModel):
 
 class ReadFileToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
+    sensitive_patterns: list[str] = Field(
+        default=["**/.env", "**/.env.*"],
+        description="File patterns that trigger ASK even when permission is ALWAYS.",
+    )
 
     max_read_bytes: int = Field(
         default=64_000, description="Maximum total bytes to read from a file in one go."
     )
 
 
+class ReadFileState(BaseToolState):
+    injected_agents_md: set[str] = Field(default_factory=set)
+
+
 class ReadFile(
-    BaseTool[ReadFileArgs, ReadFileResult, ReadFileToolConfig, BaseToolState],
+    BaseTool[ReadFileArgs, ReadFileResult, ReadFileToolConfig, ReadFileState],
     ToolUIData[ReadFileArgs, ReadFileResult],
 ):
     description: ClassVar[str] = (
-        "Read a UTF-8 file, returning content from a specific line range. "
-        "Reading is capped by a byte limit for safety."
+        "Read a text file (encoding detected safely), returning content from a "
+        "specific line range. Reading is capped by a byte limit for safety."
     )
 
     @final
@@ -77,17 +91,41 @@ class ReadFile(
         yield ReadFileResult(
             path=str(file_path),
             content="".join(read_result.lines),
+            offset=args.offset,
             lines_read=len(read_result.lines),
             was_truncated=read_result.was_truncated,
         )
 
-    def resolve_permission(self, args: ReadFileArgs) -> ToolPermission | None:
+    def resolve_permission(self, args: ReadFileArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.path,
+            tool_name=self.get_name(),
             allowlist=self.config.allowlist,
             denylist=self.config.denylist,
             config_permission=self.config.permission,
+            sensitive_patterns=self.config.sensitive_patterns,
         )
+
+    def get_result_extra(self, result: ReadFileResult) -> str | None:
+        try:
+            mgr = get_harness_files_manager()
+        except RuntimeError:
+            return None
+        docs = mgr.find_subdirectory_agents_md(Path(result.path))
+        new_docs = [
+            (d, c)
+            for d, c in docs
+            if str(d.resolve()) not in self.state.injected_agents_md
+        ]
+        if not new_docs:
+            return None
+        for d, _ in new_docs:
+            self.state.injected_agents_md.add(str(d.resolve()))
+        sections = [
+            f"Contents of {d}/AGENTS.md (project instructions for this directory):\n\n{c.strip()}"
+            for d, c in new_docs
+        ]
+        return f"<{VIBE_WARNING_TAG}>\n{'\n\n'.join(sections)}\n</{VIBE_WARNING_TAG}>"
 
     def _prepare_and_validate_path(self, args: ReadFileArgs) -> Path:
         self._validate_inputs(args)
@@ -101,39 +139,38 @@ class ReadFile(
 
     async def _read_file(self, args: ReadFileArgs, file_path: Path) -> _ReadResult:
         try:
-            lines_to_return: list[str] = []
+            raw_lines: list[bytes] = []
             bytes_read = 0
-            was_truncated = False
+            was_truncated = True
 
-            async with await anyio.Path(file_path).open(
-                encoding="utf-8", errors="ignore"
-            ) as f:
+            async with await anyio.Path(file_path).open("rb") as f:
                 line_index = 0
-                async for line in f:
+                while raw_line := await f.readline():
                     if line_index < args.offset:
                         line_index += 1
                         continue
 
-                    if args.limit is not None and len(lines_to_return) >= args.limit:
+                    if args.limit is not None and len(raw_lines) >= args.limit:
                         break
 
-                    line_bytes = len(line.encode("utf-8"))
+                    line_bytes = len(raw_line)
                     if bytes_read + line_bytes > self.config.max_read_bytes:
-                        was_truncated = True
                         break
 
-                    lines_to_return.append(line)
+                    raw_lines.append(raw_line)
                     bytes_read += line_bytes
                     line_index += 1
-
-            return _ReadResult(
-                lines=lines_to_return,
-                bytes_read=bytes_read,
-                was_truncated=was_truncated,
-            )
-
+                else:
+                    was_truncated = False
         except OSError as exc:
             raise ToolError(f"Error reading {file_path}: {exc}") from exc
+
+        lines_to_return = decode_safe(b"".join(raw_lines)).text.splitlines(
+            keepends=True
+        )
+        return _ReadResult(
+            lines=lines_to_return, bytes_read=bytes_read, was_truncated=was_truncated
+        )
 
     def _validate_inputs(self, args: ReadFileArgs) -> None:
         if not args.path.strip():
@@ -160,6 +197,7 @@ class ReadFile(
 
     @classmethod
     def format_call_display(cls, args: ReadFileArgs) -> ToolCallDisplay:
+        tag = " (scratchpad)" if is_scratchpad_path(args.path) else ""
         summary = f"Reading {args.path}"
         if args.offset > 0 or args.limit is not None:
             parts = []
@@ -168,7 +206,7 @@ class ReadFile(
             if args.limit is not None:
                 parts.append(f"limit {args.limit} lines")
             summary += f" ({', '.join(parts)})"
-        return ToolCallDisplay(summary=summary)
+        return ToolCallDisplay(summary=f"{summary}{tag}")
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -178,7 +216,8 @@ class ReadFile(
             )
 
         path_obj = Path(event.result.path)
-        message = f"Read {event.result.lines_read} line{'' if event.result.lines_read <= 1 else 's'} from {path_obj.name}"
+        tag = " (scratchpad)" if is_scratchpad_path(event.result.path) else ""
+        message = f"Read {event.result.lines_read} line{'' if event.result.lines_read <= 1 else 's'} from {path_obj.name}{tag}"
         if event.result.was_truncated:
             message += " (truncated)"
 

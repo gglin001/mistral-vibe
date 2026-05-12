@@ -58,7 +58,7 @@ def acp_write_file_tool(
         session_id="test_session_123",
         tool_call_id="test_tool_call_456",
     )
-    return WriteFile(config=config, state=state)
+    return WriteFile(config_getter=lambda: config, state=state)
 
 
 class TestAcpWriteFileBasic:
@@ -95,7 +95,7 @@ class TestAcpWriteFileExecution:
     ) -> None:
         monkeypatch.chdir(tmp_path)
         tool = WriteFile(
-            config=WriteFileConfig(),
+            config_getter=lambda: WriteFileConfig(),
             state=AcpWriteFileState.model_construct(
                 client=mock_client, session_id="test_session", tool_call_id="test_call"
             ),
@@ -130,7 +130,7 @@ class TestAcpWriteFileExecution:
         mock_client._write_error = RuntimeError("Permission denied")
 
         tool = WriteFile(
-            config=WriteFileConfig(),
+            config_getter=lambda: WriteFileConfig(),
             state=AcpWriteFileState.model_construct(
                 client=mock_client, session_id="test_session", tool_call_id="test_call"
             ),
@@ -149,7 +149,7 @@ class TestAcpWriteFileExecution:
     ) -> None:
         monkeypatch.chdir(tmp_path)
         tool = WriteFile(
-            config=WriteFileConfig(),
+            config_getter=lambda: WriteFileConfig(),
             state=AcpWriteFileState.model_construct(
                 client=None, session_id="test_session", tool_call_id="test_call"
             ),
@@ -171,7 +171,7 @@ class TestAcpWriteFileExecution:
         monkeypatch.chdir(tmp_path)
         mock_client = MockClient()
         tool = WriteFile(
-            config=WriteFileConfig(),
+            config_getter=lambda: WriteFileConfig(),
             state=AcpWriteFileState.model_construct(
                 client=mock_client, session_id=None, tool_call_id="test_call"
             ),
@@ -211,7 +211,7 @@ class TestAcpWriteFileSessionUpdates:
         assert update.content[0].new_text == "Hello"
         assert update.locations is not None
         assert len(update.locations) == 1
-        assert update.locations[0].path == "/tmp/test.txt"
+        assert update.locations[0].path == str(Path("/tmp/test.txt").resolve())
 
     def test_tool_call_session_update_invalid_args(self) -> None:
         from vibe.core.types import FunctionCall, ToolCall
@@ -232,7 +232,8 @@ class TestAcpWriteFileSessionUpdates:
         )
 
         update = WriteFile.tool_call_session_update(event)
-        assert update is None
+        assert update is not None
+        assert update.title == "write_file"
 
     def test_tool_result_session_update(self) -> None:
         result = WriteFileResult(
@@ -260,7 +261,7 @@ class TestAcpWriteFileSessionUpdates:
         assert update.content[0].new_text == "Hello"
         assert update.locations is not None
         assert len(update.locations) == 1
-        assert update.locations[0].path == "/tmp/test.txt"
+        assert update.locations[0].path == str(Path("/tmp/test.txt").resolve())
 
     def test_tool_result_session_update_invalid_result(self) -> None:
         class InvalidResult:
@@ -274,4 +275,5 @@ class TestAcpWriteFileSessionUpdates:
         )
 
         update = WriteFile.tool_result_session_update(event)
-        assert update is None
+        assert update is not None
+        assert update.status == "failed"

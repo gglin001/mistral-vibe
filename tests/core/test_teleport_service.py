@@ -16,18 +16,19 @@ from vibe.core.teleport.errors import (
     ServiceTeleportNotSupportedError,
 )
 from vibe.core.teleport.git import GitRepoInfo
-from vibe.core.teleport.nuage import TeleportSession
-from vibe.core.teleport.teleport import _NUAGE_EXECUTION_URL_TEMPLATE, TeleportService
+from vibe.core.teleport.nuage import GitHubStatus, TeleportSession
+from vibe.core.teleport.teleport import TeleportService
 from vibe.core.teleport.types import (
     TeleportAuthCompleteEvent,
     TeleportAuthRequiredEvent,
     TeleportCheckingGitEvent,
     TeleportCompleteEvent,
+    TeleportFetchingUrlEvent,
     TeleportPushingEvent,
     TeleportPushRequiredEvent,
     TeleportPushResponseEvent,
-    TeleportSendingGithubTokenEvent,
     TeleportStartingWorkflowEvent,
+    TeleportWaitingForGitHubEvent,
 )
 
 
@@ -44,9 +45,9 @@ class TestTeleportServiceCompressDiff:
         mock_session_logger = MagicMock()
         return TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="api-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
             workdir=tmp_path,
         )
 
@@ -68,19 +69,19 @@ class TestTeleportServiceCompressDiff:
             service._compress_diff(large_diff, max_size=100)
 
 
-class TestTeleportServiceBuildSandbox:
+class TestTeleportServiceBuildGitHubParams:
     @pytest.fixture
     def service(self, tmp_path: Path) -> TeleportService:
         mock_session_logger = MagicMock()
         return TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="api-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
             workdir=tmp_path,
         )
 
-    def test_builds_sandbox_from_git_info(self, service: TeleportService) -> None:
+    def test_builds_params_from_git_info(self, service: TeleportService) -> None:
         git_info = GitRepoInfo(
             remote_url="https://github.com/owner/repo.git",
             owner="owner",
@@ -89,14 +90,12 @@ class TestTeleportServiceBuildSandbox:
             commit="abc123",
             diff="",
         )
-        sandbox = service._build_sandbox(git_info)
+        params = service._build_github_params(git_info)
 
-        assert sandbox.type == "new"
-        assert sandbox.config.git_repo is not None
-        assert sandbox.config.git_repo.url == "https://github.com/owner/repo.git"
-        assert sandbox.config.git_repo.branch == "main"
-        assert sandbox.config.git_repo.commit == "abc123"
-        assert sandbox.teleported_diffs is None
+        assert params.repo == "owner/repo"
+        assert params.branch == "main"
+        assert params.commit == "abc123"
+        assert params.teleported_diffs is None
 
     def test_includes_compressed_diff(self, service: TeleportService) -> None:
         git_info = GitRepoInfo(
@@ -107,9 +106,9 @@ class TestTeleportServiceBuildSandbox:
             commit="abc123",
             diff="diff content",
         )
-        sandbox = service._build_sandbox(git_info)
+        params = service._build_github_params(git_info)
 
-        assert sandbox.teleported_diffs is not None
+        assert params.teleported_diffs is not None
 
 
 class TestTeleportServiceValidateConfig:
@@ -117,26 +116,39 @@ class TestTeleportServiceValidateConfig:
         mock_session_logger = MagicMock()
         service = TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="",
             workdir=tmp_path,
         )
-        with pytest.raises(
-            ServiceTeleportError, match="STAGING_MISTRAL_API_KEY not set"
-        ):
+        with pytest.raises(ServiceTeleportError, match="MISTRAL_API_KEY not set"):
             service._validate_config()
 
     def test_passes_when_api_key_set(self, tmp_path: Path) -> None:
         mock_session_logger = MagicMock()
         service = TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="valid-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="valid-key",
             workdir=tmp_path,
         )
         service._validate_config()
+
+    def test_uses_custom_env_var_name_in_error(self, tmp_path: Path) -> None:
+        mock_session_logger = MagicMock()
+        mock_config = MagicMock()
+        mock_config.vibe_code_api_key_env_var = "CUSTOM_API_KEY"
+        service = TeleportService(
+            session_logger=mock_session_logger,
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="",
+            workdir=tmp_path,
+            vibe_config=mock_config,
+        )
+        with pytest.raises(ServiceTeleportError, match="CUSTOM_API_KEY not set"):
+            service._validate_config()
 
 
 class TestTeleportServiceCheckSupported:
@@ -145,9 +157,9 @@ class TestTeleportServiceCheckSupported:
         mock_session_logger = MagicMock()
         return TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="api-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
             workdir=tmp_path,
         )
 
@@ -173,7 +185,9 @@ class TestTeleportServiceCheckSupported:
         self, service: TeleportService
     ) -> None:
         service._git.get_info = AsyncMock(
-            side_effect=ServiceTeleportNotSupportedError("Not a git repository")
+            side_effect=ServiceTeleportNotSupportedError(
+                "Teleport requires a git repository. cd into a project with a .git directory and try again."
+            )
         )
         with pytest.raises(ServiceTeleportNotSupportedError):
             await service.check_supported()
@@ -185,9 +199,9 @@ class TestTeleportServiceIsSupported:
         mock_session_logger = MagicMock()
         return TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="api-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
             workdir=tmp_path,
         )
 
@@ -208,11 +222,13 @@ class TestTeleportServiceExecute:
         mock_session_logger = MagicMock()
         service = TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="api-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
             workdir=tmp_path,
         )
+        service._git.fetch = AsyncMock()
+        service._git.is_branch_pushed = AsyncMock(return_value=True)
         return service
 
     @pytest.fixture
@@ -226,21 +242,34 @@ class TestTeleportServiceExecute:
             diff="",
         )
 
+    @pytest.fixture
+    def mock_github_connected(self) -> MagicMock:
+        github_data = MagicMock()
+        github_data.connected = True
+        github_data.oauth_url = None
+        github_data.status = GitHubStatus.CONNECTED
+        return github_data
+
     @pytest.mark.asyncio
-    async def test_execute_happy_path_commit_pushed_with_token(
-        self, service: TeleportService, git_info: GitRepoInfo
+    async def test_execute_happy_path_github_already_connected(
+        self,
+        service: TeleportService,
+        git_info: GitRepoInfo,
+        mock_github_connected: MagicMock,
     ) -> None:
         service._git.get_info = AsyncMock(return_value=git_info)
         service._git.is_commit_pushed = AsyncMock(return_value=True)
 
-        mock_github_auth = MagicMock()
-        mock_github_auth.get_valid_token = AsyncMock(return_value="ghp_existing_token")
-        service._github_auth = mock_github_auth
+        async def _connected_gen(*_a: object, **_kw: object):  # type: ignore[no-untyped-def]
+            yield mock_github_connected
 
         mock_nuage = MagicMock()
         mock_nuage.start_workflow = AsyncMock(return_value="exec-123")
-        mock_nuage.send_github_token = AsyncMock()
-        service._nuage = mock_nuage
+        mock_nuage.wait_for_github_connection = _connected_gen
+        mock_nuage.get_chat_assistant_url = AsyncMock(
+            return_value="https://chat.example.com/123"
+        )
+        service._nuage_client_instance = mock_nuage
 
         session = TeleportSession()
         events = []
@@ -250,30 +279,37 @@ class TestTeleportServiceExecute:
 
         assert isinstance(events[0], TeleportCheckingGitEvent)
         assert isinstance(events[1], TeleportStartingWorkflowEvent)
-        assert isinstance(events[2], TeleportSendingGithubTokenEvent)
-        assert isinstance(events[3], TeleportCompleteEvent)
-        expected_url = _NUAGE_EXECUTION_URL_TEMPLATE.format(
-            workflow_id="workflow-id", execution_id="exec-123"
-        )
-        assert events[3].url == expected_url
+        assert isinstance(events[2], TeleportWaitingForGitHubEvent)
+        assert isinstance(events[3], TeleportAuthCompleteEvent)
+        assert isinstance(events[4], TeleportFetchingUrlEvent)
+        assert isinstance(events[5], TeleportCompleteEvent)
+        assert events[5].url == "https://chat.example.com/123"
+        workflow_params = mock_nuage.start_workflow.call_args.args[0]
+        assert workflow_params.integrations.chat_assistant is not None
+        assert workflow_params.integrations.chat_assistant.project_name is None
 
     @pytest.mark.asyncio
     async def test_execute_requires_push_and_user_approves(
-        self, service: TeleportService, git_info: GitRepoInfo
+        self,
+        service: TeleportService,
+        git_info: GitRepoInfo,
+        mock_github_connected: MagicMock,
     ) -> None:
         service._git.get_info = AsyncMock(return_value=git_info)
         service._git.is_commit_pushed = AsyncMock(return_value=False)
         service._git.get_unpushed_commit_count = AsyncMock(return_value=3)
         service._git.push_current_branch = AsyncMock(return_value=True)
 
-        mock_github_auth = MagicMock()
-        mock_github_auth.get_valid_token = AsyncMock(return_value="ghp_token")
-        service._github_auth = mock_github_auth
+        async def _connected_gen(*_a: object, **_kw: object):  # type: ignore[no-untyped-def]
+            yield mock_github_connected
 
         mock_nuage = MagicMock()
         mock_nuage.start_workflow = AsyncMock(return_value="exec-123")
-        mock_nuage.send_github_token = AsyncMock()
-        service._nuage = mock_nuage
+        mock_nuage.wait_for_github_connection = _connected_gen
+        mock_nuage.get_chat_assistant_url = AsyncMock(
+            return_value="https://chat.example.com/123"
+        )
+        service._nuage_client_instance = mock_nuage
 
         session = TeleportSession()
         events = []
@@ -315,26 +351,35 @@ class TestTeleportServiceExecute:
             await gen.asend(TeleportPushResponseEvent(approved=False))
 
     @pytest.mark.asyncio
-    async def test_execute_requires_auth_flow(
+    async def test_execute_requires_oauth_flow(
         self, service: TeleportService, git_info: GitRepoInfo
     ) -> None:
         service._git.get_info = AsyncMock(return_value=git_info)
         service._git.is_commit_pushed = AsyncMock(return_value=True)
 
-        mock_handle = MagicMock()
-        mock_handle.info.user_code = "ABC-123"
-        mock_handle.info.verification_uri = "https://github.com/login/device"
+        github_pending = MagicMock()
+        github_pending.connected = False
+        github_pending.oauth_url = "https://github.com/login/oauth"
+        github_pending.error = "Please connect GitHub"
+        github_pending.status = GitHubStatus.WAITING_FOR_OAUTH
 
-        mock_github_auth = MagicMock()
-        mock_github_auth.get_valid_token = AsyncMock(return_value=None)
-        mock_github_auth.start_device_flow = AsyncMock(return_value=mock_handle)
-        mock_github_auth.wait_for_token = AsyncMock(return_value="ghp_new_token")
-        service._github_auth = mock_github_auth
+        github_connected = MagicMock()
+        github_connected.connected = True
+        github_connected.oauth_url = None
+        github_connected.error = None
+        github_connected.status = GitHubStatus.CONNECTED
+
+        async def _oauth_gen(*_a: object, **_kw: object):  # type: ignore[no-untyped-def]
+            yield github_pending
+            yield github_connected
 
         mock_nuage = MagicMock()
         mock_nuage.start_workflow = AsyncMock(return_value="exec-123")
-        mock_nuage.send_github_token = AsyncMock()
-        service._nuage = mock_nuage
+        mock_nuage.wait_for_github_connection = _oauth_gen
+        mock_nuage.get_chat_assistant_url = AsyncMock(
+            return_value="https://chat.example.com/123"
+        )
+        service._nuage_client_instance = mock_nuage
 
         session = TeleportSession()
         events = []
@@ -343,35 +388,72 @@ class TestTeleportServiceExecute:
             events.append(event)
 
         assert isinstance(events[0], TeleportCheckingGitEvent)
-        assert isinstance(events[1], TeleportAuthRequiredEvent)
-        assert events[1].user_code == "ABC-123"
-        assert isinstance(events[2], TeleportAuthCompleteEvent)
-        assert isinstance(events[3], TeleportStartingWorkflowEvent)
+        assert isinstance(events[1], TeleportStartingWorkflowEvent)
+        assert isinstance(events[2], TeleportWaitingForGitHubEvent)
+        assert events[2].message is None
+        assert isinstance(events[3], TeleportAuthRequiredEvent)
+        assert events[3].oauth_url == "https://github.com/login/oauth"
+        assert isinstance(events[4], TeleportWaitingForGitHubEvent)
+        assert events[4].message == "Please connect GitHub"
+        assert isinstance(events[5], TeleportAuthCompleteEvent)
         assert isinstance(events[-1], TeleportCompleteEvent)
 
     @pytest.mark.asyncio
-    async def test_execute_uses_default_prompt_when_none(
-        self, service: TeleportService, git_info: GitRepoInfo
+    async def test_execute_raises_when_chat_url_is_none(
+        self,
+        service: TeleportService,
+        git_info: GitRepoInfo,
+        mock_github_connected: MagicMock,
     ) -> None:
         service._git.get_info = AsyncMock(return_value=git_info)
         service._git.is_commit_pushed = AsyncMock(return_value=True)
 
-        mock_github_auth = MagicMock()
-        mock_github_auth.get_valid_token = AsyncMock(return_value="ghp_token")
-        service._github_auth = mock_github_auth
+        async def _connected_gen(*_a: object, **_kw: object):  # type: ignore[no-untyped-def]
+            yield mock_github_connected
 
         mock_nuage = MagicMock()
         mock_nuage.start_workflow = AsyncMock(return_value="exec-123")
-        mock_nuage.send_github_token = AsyncMock()
-        service._nuage = mock_nuage
+        mock_nuage.wait_for_github_connection = _connected_gen
+        mock_nuage.get_chat_assistant_url = AsyncMock(return_value=None)
+        service._nuage_client_instance = mock_nuage
 
         session = TeleportSession()
+        gen = service.execute("test prompt", session)
+
+        with pytest.raises(ServiceTeleportError, match="not available"):
+            async for _ in gen:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_execute_uses_default_prompt_when_none(
+        self,
+        service: TeleportService,
+        git_info: GitRepoInfo,
+        mock_github_connected: MagicMock,
+    ) -> None:
+        service._git.get_info = AsyncMock(return_value=git_info)
+        service._git.is_commit_pushed = AsyncMock(return_value=True)
+
+        async def _connected_gen(*_a: object, **_kw: object):  # type: ignore[no-untyped-def]
+            yield mock_github_connected
+
+        mock_nuage = MagicMock()
+        mock_nuage.start_workflow = AsyncMock(return_value="exec-123")
+        mock_nuage.wait_for_github_connection = _connected_gen
+        mock_nuage.get_chat_assistant_url = AsyncMock(
+            return_value="https://chat.example.com/123"
+        )
+        service._nuage_client_instance = mock_nuage
+
+        session = TeleportSession(
+            messages=[{"role": "user", "content": "help me refactor"}]
+        )
         gen = service.execute(None, session)
         async for _ in gen:
             pass
 
         call_args = mock_nuage.start_workflow.call_args
-        assert "continue where you left off" in call_args[0][0].prompt
+        assert "teleported" in call_args[0][0].prompt.lower()
 
 
 class TestTeleportServiceContextManager:
@@ -380,16 +462,15 @@ class TestTeleportServiceContextManager:
         mock_session_logger = MagicMock()
         service = TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="api-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
             workdir=tmp_path,
         )
         assert service._client is None
         async with service:
             assert service._client is not None
-            assert service._github_auth is not None
-            assert service._nuage is not None
+            assert service._nuage_client_instance is not None
         assert service._client is None
 
 

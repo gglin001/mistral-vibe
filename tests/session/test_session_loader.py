@@ -9,7 +9,8 @@ import pytest
 
 from vibe.core.config import SessionLoggingConfig
 from vibe.core.session.session_loader import SessionLoader
-from vibe.core.types import LLMMessage, Role, ToolCall
+from vibe.core.types import LLMMessage, Role, SessionMetadata, ToolCall
+from vibe.core.utils.io import read_safe
 
 
 @pytest.fixture
@@ -37,10 +38,12 @@ def create_test_session():
         session_id: str,
         messages: list[LLMMessage] | None = None,
         metadata: dict | None = None,
+        encoding: str = "utf-8",
+        working_directory: Path | None = Path("/test"),
     ) -> Path:
         """Create a test session directory with messages and metadata files."""
         # Create session directory
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         session_folder = session_dir / f"test_{timestamp}_{session_id[:8]}"
         session_folder.mkdir(exist_ok=True)
 
@@ -53,7 +56,7 @@ def create_test_session():
                 LLMMessage(role=Role.assistant, content="Hi there!"),
             ]
 
-        with messages_file.open("w", encoding="utf-8") as f:
+        with messages_file.open("w", encoding=encoding) as f:
             for message in messages:
                 f.write(
                     json.dumps(
@@ -76,9 +79,13 @@ def create_test_session():
                     "session_completion_tokens": 20,
                 },
                 "system_prompt": {"content": "System prompt", "role": "system"},
+                "username": "testuser",
+                "environment": {"working_directory": str(working_directory)},
+                "git_commit": None,
+                "git_branch": None,
             }
 
-        with metadata_file.open("w", encoding="utf-8") as f:
+        with metadata_file.open("w", encoding=encoding) as f:
             json.dump(metadata, f, indent=2)
 
         return session_folder
@@ -122,6 +129,93 @@ class TestSessionLoaderFindLatestSession:
         assert result is not None
         assert result.exists()
         assert result == latest
+
+    @pytest.mark.parametrize(
+        ("cwd", "expected_id"),
+        [
+            pytest.param(
+                Path("/home/user/project-a"), "aaaaaaaa", id="get_latest_in_existing_a"
+            ),
+            pytest.param(
+                Path("/home/user/project-b"), "bbbbbbbb", id="get_latest_in_existing_b"
+            ),
+            pytest.param(
+                Path("/home/user/project-c"), None, id="get_latest_in_missing_c"
+            ),
+            pytest.param(None, "aaaaaaaa", id="get_latest_globally"),
+        ],
+    )
+    def test_find_latest_session_cwd_filtering(
+        self,
+        session_config: SessionLoggingConfig,
+        create_test_session,
+        cwd: Path | None,
+        expected_id: str | None,
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session(
+            session_dir,
+            "aaaaaaaa-session",
+            working_directory=Path("/home/user/project-a"),
+        )
+        time.sleep(0.01)
+        create_test_session(
+            session_dir,
+            "bbbbbbbb-session",
+            working_directory=Path("/home/user/project-b"),
+        )
+        time.sleep(0.01)
+        second_b = create_test_session(
+            session_dir,
+            "bbbbbbbb-session",
+            working_directory=Path("/home/user/project-b"),
+        )
+        time.sleep(0.01)
+        second_a = create_test_session(
+            session_dir,
+            "aaaaaaaa-session",
+            working_directory=Path("/home/user/project-a"),
+        )
+
+        assert len(list(session_dir.glob("test_*"))) == 4
+
+        expected: Path | None
+        if expected_id == "aaaaaaaa":
+            expected = second_a
+        elif expected_id == "bbbbbbbb":
+            expected = second_b
+        elif expected_id is None:
+            expected = None
+        else:
+            raise NotImplementedError(expected_id)
+
+        result = SessionLoader.find_latest_session(
+            session_config, working_directory=cwd
+        )
+        assert result == expected
+
+    def test_find_latest_session_cwd_filtering_skips_invalid_metadata(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        expected = create_test_session(
+            session_dir,
+            "valid-cwd-session",
+            working_directory=Path("/home/user/project-a"),
+        )
+        time.sleep(0.01)
+        invalid_metadata_session = create_test_session(
+            session_dir,
+            "invalid-metadata",
+            working_directory=Path("/home/user/project-a"),
+        )
+        (invalid_metadata_session / "meta.json").write_text("{}")
+
+        result = SessionLoader.find_latest_session(
+            session_config, working_directory=Path("/home/user/project-a")
+        )
+        assert result == expected
 
     def test_find_latest_session_nonexistent_save_dir(self) -> None:
         """Test finding latest session when save directory doesn't exist."""
@@ -952,3 +1046,141 @@ class TestSessionLoaderGetFirstUserMessage:
 
         # Should return "User question", not "Assistant response"
         assert result == "User question"
+
+
+class TestSessionLoaderUTF8Encoding:
+    def test_load_metadata_defaults_title_source_for_existing_sessions(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = session_dir / "test_20230101_120000_legacyttl"
+        session_folder.mkdir()
+
+        metadata_content = {
+            "session_id": "legacy-title-test",
+            "start_time": "2023-01-01T12:00:00Z",
+            "end_time": "2023-01-01T12:05:00Z",
+            "environment": {"working_directory": "/home/user/project"},
+            "username": "testuser",
+            "git_commit": None,
+            "git_branch": None,
+            "title": "Existing title",
+        }
+
+        metadata_file = session_folder / "meta.json"
+        with metadata_file.open("w", encoding="utf-8") as f:
+            json.dump(metadata_content, f, indent=2, ensure_ascii=False)
+
+        messages_file = session_folder / "messages.jsonl"
+        messages_file.write_text('{"role": "user", "content": "Hello"}\n')
+
+        metadata = SessionLoader.load_metadata(session_folder)
+
+        assert metadata.title == "Existing title"
+        assert metadata.title_source == "auto"
+
+    def test_load_metadata_with_utf8_encoding(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = create_test_session(session_dir, "utf8-test")
+
+        metadata = SessionLoader.load_metadata(session_folder)
+
+        assert metadata.session_id == "utf8-test"
+        assert metadata.start_time == "2023-01-01T12:00:00Z"
+        assert metadata.username is not None
+
+    def test_load_metadata_with_unicode_characters(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = session_dir / "test_20230101_120000_unicode0"
+        session_folder.mkdir()
+
+        metadata_content = {
+            "session_id": "unicode-test-123",
+            "start_time": "2023-01-01T12:00:00Z",
+            "end_time": "2023-01-01T12:05:00Z",
+            "environment": {"working_directory": "/home/user/café_project"},
+            "username": "testuser",
+            "git_commit": None,
+            "git_branch": None,
+        }
+
+        metadata_file = session_folder / "meta.json"
+        with metadata_file.open("w", encoding="utf-8") as f:
+            json.dump(metadata_content, f, indent=2, ensure_ascii=False)
+
+        messages_file = session_folder / "messages.jsonl"
+        messages_file.write_text('{"role": "user", "content": "Hello"}\n')
+
+        metadata = SessionLoader.load_metadata(session_folder)
+
+        assert metadata.session_id == "unicode-test-123"
+        assert metadata.environment["working_directory"] == "/home/user/café_project"
+
+    def test_load_metadata_with_different_encoding_handled(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = session_dir / "test_20230101_120000_latin100"
+        session_folder.mkdir()
+
+        # Path contains U+0081; file written as Latin-1. Decoding matches read_safe.
+        metadata_content = {
+            "session_id": "latin1-test",
+            "start_time": "2023-01-01T12:00:00Z",
+            "end_time": "2023-01-01T12:05:00Z",
+            "username": "testuser",
+            "environment": {"working_directory": "/home/user/caf\x81_project"},
+            "git_commit": None,
+            "git_branch": None,
+        }
+
+        metadata_file = session_folder / "meta.json"
+        with metadata_file.open("w", encoding="latin-1") as f:
+            json.dump(metadata_content, f, indent=2, ensure_ascii=False)
+
+        messages_file = session_folder / "messages.jsonl"
+        messages_file.write_text('{"role": "user", "content": "Hello"}\n')
+
+        expected = SessionMetadata.model_validate_json(read_safe(metadata_file).text)
+        metadata = SessionLoader.load_metadata(session_folder)
+        assert metadata.session_id == "latin1-test"
+        assert metadata == expected
+
+    def test_load_session_with_utf8_metadata_and_messages(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = session_dir / "test_20230101_120000_utf8all0"
+        session_folder.mkdir()
+
+        metadata_content = {
+            "session_id": "utf8-all-test",
+            "start_time": "2023-01-01T12:00:00Z",
+            "end_time": "2023-01-01T12:05:00Z",
+            "username": "testuser",
+            "environment": {},
+            "git_commit": None,
+            "git_branch": None,
+        }
+
+        metadata_file = session_folder / "meta.json"
+        with metadata_file.open("w", encoding="utf-8") as f:
+            json.dump(metadata_content, f, indent=2, ensure_ascii=False)
+
+        messages_file = session_folder / "messages.jsonl"
+        messages_file.write_text(
+            '{"role": "user", "content": "Hello café"}\n'
+            + '{"role": "assistant", "content": "Hi there naïve"}\n',
+            encoding="utf-8",
+        )
+
+        messages, metadata = SessionLoader.load_session(session_folder)
+
+        assert metadata["session_id"] == "utf8-all-test"
+        assert len(messages) == 2
+        assert messages[0].content == "Hello café"
+        assert messages[1].content == "Hi there naïve"

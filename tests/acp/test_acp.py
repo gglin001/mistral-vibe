@@ -463,14 +463,6 @@ class TestSessionUpdates:
                 == "available_commands_update"
             )
 
-            user_response_text = await read_response(process)
-            assert user_response_text is not None
-            user_response = UpdateJsonRpcNotification.model_validate(
-                json.loads(user_response_text)
-            )
-            assert user_response.params is not None
-            assert user_response.params.update.session_update == "user_message_chunk"
-
             text_response = await read_response(process)
             assert text_response is not None
             response = UpdateJsonRpcNotification.model_validate(
@@ -521,12 +513,11 @@ class TestSessionUpdates:
                     ),
                 ),
             )
-            text_responses = await read_multiple_responses(process, max_count=10)
+            text_responses = await read_multiple_responses(
+                process, max_count=15, timeout_per_response=2.0
+            )
             assert len(text_responses) > 0
-            responses = [
-                UpdateJsonRpcNotification.model_validate(json.loads(r))
-                for r in text_responses
-            ]
+            responses = parse_conversation(text_responses)
 
             tool_call = next(
                 (
@@ -574,7 +565,7 @@ async def start_session_with_request_permission(
 
     assert isinstance(last_response, RequestPermissionJsonRpcRequest)
     assert last_response.params is not None
-    assert len(last_response.params.options) == 3
+    assert len(last_response.params.options) == 4
     return last_response
 
 
@@ -758,6 +749,44 @@ class TestToolCallStructure:
                 None,
             )
             assert rejected_tool_call is not None
+
+    @pytest.mark.asyncio
+    async def test_permission_options_include_granular_labels_for_bash(
+        self, vibe_home_dir: Path
+    ) -> None:
+        """Bash 'npm install foo' should produce granular labels in permission options."""
+        custom_results = [
+            mock_llm_chunk(
+                tool_calls=[
+                    ToolCall(
+                        function=FunctionCall(
+                            name="bash", arguments='{"command":"npm install foo"}'
+                        ),
+                        type="function",
+                        index=0,
+                    )
+                ]
+            ),
+            mock_llm_chunk(content="Done"),
+        ]
+        mock_env = get_mocking_env(custom_results)
+        async for process in get_acp_agent_loop_process(
+            mock_env=mock_env, vibe_home=vibe_home_dir
+        ):
+            permission_request = await start_session_with_request_permission(
+                process, "Run npm install foo"
+            )
+            assert permission_request.params is not None
+
+            # Verify granular permissions are passed in field_meta
+            allow_always = next(
+                o
+                for o in permission_request.params.options
+                if o.option_id == ToolOption.ALLOW_ALWAYS
+            )
+            assert allow_always.name == "Allow for remainder of this session"
+            assert allow_always.field_meta is not None
+            assert "required_permissions" in allow_always.field_meta
 
     @pytest.mark.skip(reason="Long running tool call updates are not implemented yet")
     @pytest.mark.asyncio

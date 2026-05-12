@@ -102,6 +102,26 @@ def get_latest_version() -> str:
     return max(versions)[3]
 
 
+def get_base_version_from_current_branch() -> str:
+    result = run_git_command(
+        "describe",
+        "--tags",
+        "--match",
+        "v[0-9]*.[0-9]*.[0-9]*",
+        "--exclude",
+        "*-private",
+        "--abbrev=0",
+        "HEAD",
+        capture_output=True,
+    )
+    tag = result.stdout.strip()
+    match = re.match(r"^v(\d+\.\d+\.\d+)$", tag)
+    if not match:
+        raise ValueError(f"Invalid base version tag found: {tag}")
+
+    return match.group(1)
+
+
 def parse_version(version_str: str) -> tuple[int, int, int]:
     match = re.match(r"^(\d+)\.(\d+)\.(\d+)$", version_str.strip())
     if not match:
@@ -130,25 +150,71 @@ def create_release_branch(version: str) -> None:
     print(f"Created and switched to branch {branch_name}")
 
 
-def cherry_pick_commits(previous_version: str, current_version: str) -> None:
-    previous_tag = f"v{previous_version}-private"
-    current_tag = f"v{current_version}-private"
-
+def cherry_pick_commits(previous_private_tag: str, current_private_tag: str) -> None:
     result = run_git_command(
-        "rev-parse", "--verify", previous_tag, capture_output=True, check=False
+        "rev-parse", "--verify", previous_private_tag, capture_output=True, check=False
     )
     if result.returncode != 0:
-        raise ValueError(f"Tag {previous_tag} does not exist")
+        raise ValueError(f"Tag {previous_private_tag} does not exist")
 
     result = run_git_command(
-        "rev-parse", "--verify", current_tag, capture_output=True, check=False
+        "rev-parse", "--verify", current_private_tag, capture_output=True, check=False
     )
     if result.returncode != 0:
-        raise ValueError(f"Tag {current_tag} does not exist")
+        raise ValueError(f"Tag {current_private_tag} does not exist")
 
-    print(f"Cherry-picking commits from {previous_tag}..{current_tag}...")
-    run_git_command("cherry-pick", f"{previous_tag}..{current_tag}")
+    print(
+        f"Cherry-picking commits from {previous_private_tag}..{current_private_tag}..."
+    )
+    run_git_command("cherry-pick", f"{previous_private_tag}..{current_private_tag}")
     print("Successfully cherry-picked all commits")
+
+
+def squash_commits(
+    previous_version: str,
+    current_version: str,
+    previous_private_tag: str,
+    current_private_tag: str,
+) -> None:
+    print("Squashing commits into a single release commit...")
+    run_git_command("reset", "--soft", f"v{previous_version}")
+
+    # Get all contributors between previous and current private tags
+    result = run_git_command(
+        "log",
+        f"{previous_private_tag}..{current_private_tag}",
+        "--format=%aN <%aE>",
+        capture_output=True,
+    )
+    contributors = result.stdout.strip().split("\n")
+
+    # Get current user
+    current_user_result = run_git_command("config", "user.email", capture_output=True)
+    current_user_email = current_user_result.stdout.strip()
+
+    # Filter out current user and create co-authored lines
+    vibe_marker = "vibe@mistral.ai"
+    unique_coauthors = {
+        f"Co-authored-by: {contributor}"
+        for contributor in contributors
+        if contributor
+        and current_user_email not in contributor
+        and vibe_marker not in contributor
+    }
+
+    # Add Mistral Vibe as co-author
+    coauthored_lines = sorted(unique_coauthors) + [
+        "Co-authored-by: Mistral Vibe <vibe@mistral.ai>"
+    ]
+
+    # Create commit message
+    commit_message = f"v{current_version}\n"
+    for line in coauthored_lines:
+        commit_message += f"\n{line}"
+
+    # Create the commit
+    run_git_command("commit", "-m", commit_message)
+    print("Successfully created release commit with co-authors")
 
 
 def get_commits_summary(previous_version: str, current_version: str) -> str:
@@ -182,6 +248,7 @@ def print_summary(
     previous_version: str,
     commits_summary: str,
     changelog_entry: str,
+    squash: bool,
 ) -> None:
     print("\n" + "=" * 80)
     print("RELEASE PREPARATION SUMMARY")
@@ -204,14 +271,15 @@ def print_summary(
     print(changelog_entry)
 
     print("\n" + "-" * 80)
-    print("NEXT STEPS")
-    print("-" * 80)
-    print(
-        f"To review/edit commits before publishing, use interactive rebase:\n"
-        f"  git rebase -i v{previous_version}"
-    )
+    if not squash:
+        print("NEXT STEPS")
+        print("-" * 80)
+        print(
+            f"To review/edit commits before publishing, use interactive rebase:\n"
+            f"  git rebase -i v{previous_version}"
+        )
 
-    print("\n" + "-" * 80)
+        print("\n" + "-" * 80)
     print("REMINDERS")
     print("-" * 80)
     print("Before publishing the release:")
@@ -231,21 +299,35 @@ def main() -> None:
     )
 
     parser.add_argument("version", help="Version to prepare release for (e.g., 1.1.3)")
+    parser.add_argument(
+        "--no-squash",
+        action="store_false",
+        dest="squash",
+        default=True,
+        help="Disable squashing of commits into a single release commit",
+    )
+    parser.add_argument(
+        "--resume", action="store_true", help="Resume after cherry-picking commits"
+    )
 
     args = parser.parse_args()
     current_version = args.version
+    squash = args.squash
 
     try:
         # Step 1: Ensure public remote exists
         ensure_public_remote()
 
-        # Step 2: Fetch all remotes
-        print("Fetching all remotes...")
-        run_git_command("fetch", "--all")
-        print("Successfully fetched all remotes")
+        if args.resume:
+            previous_version = get_base_version_from_current_branch()
+        else:
+            # Step 2: Fetch all remotes
+            print("Fetching all remotes...")
+            run_git_command("fetch", "--all")
+            print("Successfully fetched all remotes")
 
-        # Step 3: Find latest version
-        previous_version = get_latest_version()
+            # Step 3: Find latest version
+            previous_version = get_latest_version()
         print(f"Previous version: {previous_version}")
 
         # Step 4: Verify version matches pyproject.toml
@@ -257,14 +339,27 @@ def main() -> None:
             )
         print(f"Version verified: {current_version}")
 
-        # Step 5: Switch to previous version tag
-        switch_to_tag(previous_version)
+        previous_private_tag = f"v{previous_version}-private"
+        current_private_tag = f"v{current_version}-private"
 
-        # Step 6: Create release branch
-        create_release_branch(current_version)
+        if not args.resume:
+            # Step 5: Switch to previous version tag
+            switch_to_tag(previous_version)
 
-        # Step 7: Cherry-pick commits
-        cherry_pick_commits(previous_version, current_version)
+            # Step 6: Create release branch
+            create_release_branch(current_version)
+
+            # Step 7: Cherry-pick commits
+            cherry_pick_commits(previous_private_tag, current_private_tag)
+
+        # Step 8: Squash commits
+        if squash:
+            squash_commits(
+                previous_version,
+                current_version,
+                previous_private_tag,
+                current_private_tag,
+            )
 
         # Step 8: Get summary information
         commits_summary = get_commits_summary(previous_version, current_version)
@@ -272,7 +367,7 @@ def main() -> None:
 
         # Step 9: Print summary
         print_summary(
-            current_version, previous_version, commits_summary, changelog_entry
+            current_version, previous_version, commits_summary, changelog_entry, squash
         )
 
     except Exception as e:

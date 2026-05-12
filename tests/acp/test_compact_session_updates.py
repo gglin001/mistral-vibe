@@ -7,19 +7,21 @@ from unittest.mock import patch
 from acp.schema import TextContentBlock, ToolCallProgress, ToolCallStart
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.conftest import build_test_vibe_config, make_test_models
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
+from vibe.core.session.session_id import shorten_session_id
 
 
 @pytest.fixture
 def acp_agent_loop(backend: FakeBackend) -> VibeAcpAgentLoop:
     class PatchedAgent(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
-            # Force our config with auto_compact_threshold=1
-            kwargs["config"] = build_test_vibe_config(auto_compact_threshold=1)
+            kwargs["config"] = build_test_vibe_config(
+                models=make_test_models(auto_compact_threshold=1)
+            )
             super().__init__(*args, **kwargs, backend=backend)
 
     patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgent).start()
@@ -78,3 +80,10 @@ class TestCompactEventHandling:
         assert compact_end.status == "completed"
 
         assert compact_start.tool_call_id == compact_end.tool_call_id
+        assert compact_end.content is not None
+        compact_end_text = compact_end.content[0].content
+        assert isinstance(compact_end_text, TextContentBlock)
+        assert shorten_session_id(session_response.session_id) in compact_end_text.text
+        assert (
+            shorten_session_id(session.agent_loop.session_id) in compact_end_text.text
+        )

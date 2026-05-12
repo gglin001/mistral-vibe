@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+import functools
 from typing import TYPE_CHECKING, ClassVar, final
 from urllib.parse import urlparse
 
 import httpx
-from markdownify import MarkdownConverter
 from pydantic import BaseModel, Field
 
 from vibe.core.tools.base import (
@@ -16,8 +16,14 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import (
+    PermissionContext,
+    PermissionScope,
+    RequiredPermission,
+)
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils.http import build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -27,10 +33,16 @@ _HONEST_USER_AGENT = "vibe-cli"
 _HTTP_FORBIDDEN = 403
 
 
-class _Converter(MarkdownConverter):
-    convert_script = convert_style = convert_noscript = convert_iframe = (
-        convert_object
-    ) = convert_embed = lambda *_, **__: ""
+@functools.cache
+def _make_converter_class() -> type:
+    from markdownify import MarkdownConverter
+
+    class _Converter(MarkdownConverter):
+        convert_script = convert_style = convert_noscript = convert_iframe = (
+            convert_object
+        ) = convert_embed = lambda *_, **__: ""
+
+    return _Converter
 
 
 class WebFetchArgs(BaseModel):
@@ -44,6 +56,7 @@ class WebFetchResult(BaseModel):
     url: str
     content: str
     content_type: str
+    was_truncated: bool = False
 
 
 class WebFetchConfig(BaseToolConfig):
@@ -52,7 +65,8 @@ class WebFetchConfig(BaseToolConfig):
     default_timeout: int = Field(default=30, description="Default timeout in seconds.")
     max_timeout: int = Field(default=120, description="Maximum allowed timeout.")
     max_content_bytes: int = Field(
-        default=512_000, description="Maximum content size to fetch."
+        default=120_000,
+        description="Maximum content size in bytes returned to the model.",
     )
     user_agent: str = Field(
         default=(
@@ -71,14 +85,43 @@ class WebFetch(
         "Fetch content from a URL. Converts HTML to markdown for readability."
     )
 
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        """Normalise a URL to always have an http(s) scheme.
+
+        Handles protocol-relative URLs (//example.com) and bare URLs (example.com).
+        """
+        raw = url.lstrip("/") if url.startswith("//") else url
+        return raw if raw.startswith(("http://", "https://")) else "https://" + raw
+
+    def resolve_permission(self, args: WebFetchArgs) -> PermissionContext | None:
+        if self.config.permission in {ToolPermission.ALWAYS, ToolPermission.NEVER}:
+            return PermissionContext(permission=self.config.permission)
+
+        parsed = urlparse(self._normalize_url(args.url))
+        domain = parsed.netloc or parsed.path.split("/")[0]
+        if not domain:
+            return None
+
+        return PermissionContext(
+            permission=ToolPermission.ASK,
+            required_permissions=[
+                RequiredPermission(
+                    scope=PermissionScope.URL_PATTERN,
+                    invocation_pattern=domain,
+                    session_pattern=domain,
+                    label=f"fetching from {domain}",
+                )
+            ],
+        )
+
     @final
     async def run(
         self, args: WebFetchArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | WebFetchResult, None]:
         self._validate_args(args)
 
-        raw = args.url.lstrip("/") if args.url.startswith("//") else args.url
-        url = raw if raw.startswith(("http://", "https://")) else "https://" + raw
+        url = self._normalize_url(args.url)
         timeout = self._resolve_timeout(args.timeout)
 
         content, content_type = await self._fetch_url(url, timeout)
@@ -86,7 +129,20 @@ class WebFetch(
         if "text/html" in content_type:
             content = _html_to_markdown(content)
 
-        yield WebFetchResult(url=url, content=content, content_type=content_type)
+        content_bytes = content.encode("utf-8")
+        was_truncated = len(content_bytes) > self.config.max_content_bytes
+        if was_truncated:
+            content = content_bytes[: self.config.max_content_bytes].decode(
+                "utf-8", errors="ignore"
+            )
+            content += "\n\n[Content truncated due to size limit]"
+
+        yield WebFetchResult(
+            url=url,
+            content=content,
+            content_type=content_type,
+            was_truncated=was_truncated,
+        )
 
     def _validate_args(self, args: WebFetchArgs) -> None:
         if not args.url.strip():
@@ -135,11 +191,7 @@ class WebFetch(
 
         content_type = response.headers.get("Content-Type", "text/plain")
 
-        content_bytes = response.content[: self.config.max_content_bytes]
-        content = content_bytes.decode("utf-8", errors="ignore")
-
-        if len(response.content) > self.config.max_content_bytes:
-            content += "[Content truncated due to size limit]"
+        content = response.content.decode("utf-8", errors="ignore")
 
         return content, content_type
 
@@ -147,7 +199,9 @@ class WebFetch(
         self, url: str, timeout: int, headers: dict[str, str]
     ) -> httpx.Response:
         async with httpx.AsyncClient(
-            follow_redirects=True, timeout=httpx.Timeout(timeout)
+            follow_redirects=True,
+            timeout=httpx.Timeout(timeout),
+            verify=build_ssl_context(),
         ) as client:
             response = await client.get(url, headers=headers)
 
@@ -188,6 +242,8 @@ class WebFetch(
         message = (
             f"Fetched {content_len:,} chars ({event.result.content_type.split(';')[0]})"
         )
+        if event.result.was_truncated:
+            message += " [truncated]"
 
         return ToolResultDisplay(success=True, message=message)
 
@@ -197,4 +253,5 @@ class WebFetch(
 
 
 def _html_to_markdown(html: str) -> str:
-    return _Converter(heading_style="ATX", bullets="-").convert(html)
+    converter_class = _make_converter_class()
+    return converter_class(heading_style="ATX", bullets="-").convert(html)

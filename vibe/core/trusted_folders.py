@@ -5,21 +5,31 @@ import tomllib
 
 import tomli_w
 
-from vibe.core.paths.global_paths import TRUSTED_FOLDERS_FILE
-from vibe.core.paths.local_config_walk import walk_local_config_dirs_all
-
-AGENTS_MD_FILENAMES = ["AGENTS.md", "VIBE.md", ".vibe.md"]
+from vibe.core.paths import (
+    AGENTS_MD_FILENAME,
+    TRUSTED_FOLDERS_FILE,
+    walk_local_config_dirs,
+)
 
 
 def has_agents_md_file(path: Path) -> bool:
-    return any((path / name).exists() for name in AGENTS_MD_FILENAMES)
+    return (path / AGENTS_MD_FILENAME).exists()
 
 
-def has_trustable_content(path: Path) -> bool:
-    if (path / ".vibe").exists():
-        return True
-    tools_dirs, skills_dirs, agents_dirs = walk_local_config_dirs_all(path)
-    return bool(tools_dirs or skills_dirs or agents_dirs) or has_agents_md_file(path)
+def find_trustable_files(path: Path) -> list[str]:
+    """Return relative paths of files/dirs that would modify the agent's behavior."""
+    resolved = path.resolve()
+    found: list[str] = []
+
+    if has_agents_md_file(path):
+        found.append(AGENTS_MD_FILENAME)
+
+    for config_dir in walk_local_config_dirs(path).config_dirs:
+        label = f"{config_dir.relative_to(resolved)}/"
+        if label not in found:
+            found.append(label)
+
+    return found
 
 
 class TrustedFoldersManager:
@@ -27,7 +37,11 @@ class TrustedFoldersManager:
         self._file_path = TRUSTED_FOLDERS_FILE.path
         self._trusted: list[str] = []
         self._untrusted: list[str] = []
+        self._session_trusted: list[str] = []
         self._load()
+
+    def trust_for_session(self, path: Path) -> None:
+        self._session_trusted.append(self._normalize_path(path))
 
     def _normalize_path(self, path: Path) -> str:
         return str(path.expanduser().resolve())
@@ -59,11 +73,36 @@ class TrustedFoldersManager:
             pass
 
     def is_trusted(self, path: Path) -> bool | None:
-        normalized = self._normalize_path(path)
-        if normalized in self._trusted:
-            return True
-        if normalized in self._untrusted:
-            return False
+        """Check trust walking up from *path* to filesystem root.
+
+        The first ancestor (or *path* itself) found in either the trusted,
+        session-trusted, or untrusted list wins.  Returns ``None`` when no
+        decision exists.
+        """
+        current = Path(self._normalize_path(path))
+        while True:
+            s = str(current)
+            if s in self._trusted or s in self._session_trusted:
+                return True
+            if s in self._untrusted:
+                return False
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+        return None
+
+    def find_trust_root(self, path: Path) -> Path | None:
+        """Return the closest ancestor (or *path* itself) explicitly trusted."""
+        current = Path(self._normalize_path(path))
+        while True:
+            s = str(current)
+            if s in self._trusted or s in self._session_trusted:
+                return current
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
         return None
 
     def add_trusted(self, path: Path) -> None:

@@ -35,6 +35,7 @@ curl -LsSf https://mistral.ai/vibe/install.sh | bash
 **Windows**
 
 First, install uv
+
 ```bash
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
@@ -65,6 +66,7 @@ pip install mistral-vibe
   - [Interactive Mode](#interactive-mode)
   - [Trust Folder System](#trust-folder-system)
   - [Programmatic Mode](#programmatic-mode)
+- [Voice Mode](#voice-mode)
 - [Slash Commands](#slash-commands)
   - [Built-in Slash Commands](#built-in-slash-commands)
   - [Custom Slash Commands via Skills](#custom-slash-commands-via-skills)
@@ -120,6 +122,22 @@ Use the `--agent` flag to select a different agent:
 ```bash
 vibe --agent plan
 ```
+
+To change the default agent used when `--agent` is not passed, set
+`default_agent` in your `config.toml`:
+
+```toml
+default_agent = "plan"
+```
+
+Valid values are `default`, `plan`, `accept-edits`, `auto-approve`,
+`lean` (only when listed in `installed_agents`), or the name of any
+custom agent file in `~/.vibe/agents/` or the project's `.vibe/agents/`
+directory. Subagents such as `explore` are not accepted.
+
+> Note: `default_agent` only applies to interactive sessions. In
+> programmatic mode (`-p` / `--prompt`), Vibe falls back to `auto-approve`
+> when `--agent` is not provided, so `default_agent` is ignored.
 
 ### Subagents and Task Delegation
 
@@ -184,7 +202,6 @@ Most modern terminals should work, but older or minimal terminal emulators may h
    ```
 
 3. If this is your first time running Vibe, it will:
-
    - Create a default configuration file at `~/.vibe/config.toml`
    - Prompt you to enter your API key if it's not already configured
    - Save your API key to `~/.vibe/.env` for future use
@@ -217,15 +234,14 @@ Simply run `vibe` to enter the interactive chat loop.
 - **External Editor**: Press `Ctrl+G` to edit your current input in an external editor.
 - **Tool Output Toggle**: Press `Ctrl+O` to toggle the tool output view.
 - **Todo View Toggle**: Press `Ctrl+T` to toggle the todo list view.
-- **Auto-Approve Toggle**: Press `Shift+Tab` to toggle auto-approve mode on/off.
+- **Debug Console**: Press `Ctrl+\` to toggle the debug console.
+- **Agent Selection**: Press `Shift+Tab` to cycle through agents (default, plan, ...).
 
 You can start Vibe with a prompt using the following command:
 
 ```bash
 vibe "Refactor the main function in cli/main.py to be more modular."
 ```
-
-**Note**: The `--auto-approve` flag automatically approves all tool executions without prompting. In interactive mode, you can also toggle auto-approve on/off using `Shift+Tab`.
 
 ### Trust Folder System
 
@@ -262,6 +278,30 @@ Example:
 ```bash
 vibe --prompt "Analyze the codebase" --max-turns 5 --max-price 1.0 --output json
 ```
+
+## Voice Mode
+
+> [!WARNING]
+> Voice mode is experimental and may change in future releases.
+
+Voice mode allows you to dictate input using your microphone instead of typing.
+
+### Activating Voice Mode
+
+Toggle voice mode on or off with the `/voice` slash command:
+
+```
+> /voice
+```
+
+### Recording Shortcuts
+
+| Shortcut | Action           |
+| -------- | ---------------- |
+| `Ctrl+R` | Start recording  |
+| Any key  | Stop recording   |
+| `Escape` | Cancel recording |
+| `Ctrl+C` | Cancel recording |
 
 ## Slash Commands
 
@@ -386,7 +426,15 @@ Vibe supports multiple ways to configure your API keys:
 
 ### Custom System Prompts
 
-You can create custom system prompts to replace the default one (`prompts/cli.md`). Create a markdown file in the `~/.vibe/prompts/` directory with your custom prompt content.
+You can create `AGENTS.md` files to add custom instructions. You can also replace the entire system prompt.
+
+Place `AGENTS.md` files in:
+- `~/.vibe/AGENTS.md` — user-level instructions for all projects
+- Project directories — project-specific instructions, loaded from cwd up to the trust root
+
+Priority: closer directories override more distant ones. Instructions in `AGENTS.md` override the default system prompt. Files are only loaded for trusted folders.
+
+Custom system prompts entirely replace the default one (`prompts/cli.md`). Create a markdown file in the `~/.vibe/prompts/` directory with your custom prompt content.
 
 To use a custom system prompt, set the `system_prompt_id` in your configuration to match the filename (without the `.md` extension):
 
@@ -413,7 +461,7 @@ Example custom agent configuration (`~/.vibe/agents/redteam.toml`):
 
 ```toml
 # Custom agent configuration for red-teaming
-active_model = "devstral-2"
+active_model = "mistral-medium-3.5"
 system_prompt_id = "redteam"
 
 # Disable some tools for this agent
@@ -610,6 +658,7 @@ Mistral Vibe can be used in text editors and IDEs that support [Agent Client Pro
 ## Data collection & usage
 
 Use of Vibe is subject to our [Privacy Policy](https://legal.mistral.ai/terms/privacy-policy) and may include the collection and processing of data related to your use of the service, such as usage data, to operate, maintain, and improve Vibe. You can disable telemetry in your `config.toml` by setting `enable_telemetry = false`.
+
 
 ## License
 

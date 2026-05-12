@@ -84,9 +84,22 @@ TextArea > .text-area--cursor {
 }
 
 #completion-popup {
-    width: 100%;
-    padding: 1;
+    overlay: screen;
+    constrain: inside inside;
+    display: none;
+    width: auto;
+    height: auto;
     color: ansi_default;
+    background: $surface;
+    border: solid ansi_bright_black;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    /* max-height, max-width and padding set in completion_popup.py */
+}
+
+#completion-popup _CompletionItem {
+    height: auto;
+    width: 1fr;
 }
 
 #input-box {
@@ -112,6 +125,16 @@ TextArea > .text-area--cursor {
         border: solid ansi_red;
         border-title-color: ansi_red;
     }
+
+    &.border-recording {
+        border: solid $mistral_orange;
+        border-title-color: $mistral_orange;
+    }
+
+    &.border-remote {
+        border: solid $mistral_orange;
+        border-title-color: $mistral_orange;
+    }
 }
 
 #input-body {
@@ -119,7 +142,8 @@ TextArea > .text-area--cursor {
 }
 
 #prompt,
-#prompt-spinner {
+#prompt-spinner,
+#recording-indicator {
     width: auto;
     background: transparent;
     color: $mistral_orange;
@@ -137,6 +161,10 @@ TextArea > .text-area--cursor {
     border: none;
     padding: 0;
     scrollbar-visibility: hidden;
+
+    &.recording {
+        color: ansi_bright_black;
+    }
 }
 
 ToastRack {
@@ -149,7 +177,7 @@ Markdown {
     color: ansi_default;
 
     .code_inline {
-        color: ansi_yellow;
+        color: ansi_green;
         background: transparent;
         text-style: bold;
     }
@@ -227,7 +255,7 @@ Markdown {
         padding: 0;
         margin: 0;
 
-        & > *:last-child {
+        & > MarkdownBlock:last-child {
             margin-bottom: 0;
         }
     }
@@ -282,7 +310,7 @@ Markdown {
         text-style: italic;
     }
 
-    & > *:last-child {
+    & > MarkdownBlock:last-child {
         margin-bottom: 0;
     }
 }
@@ -348,11 +376,11 @@ Markdown {
         margin: 0;
         padding: 0;
 
-        & > *:first-child {
+        & > MarkdownBlock:first-child {
             margin-top: 0;
         }
 
-        & > *:last-child {
+        & > MarkdownBlock:last-child {
             margin-bottom: 0;
         }
     }
@@ -378,12 +406,20 @@ Markdown {
     width: auto;
     height: auto;
 
+    &.bash-pending {
+        color: $foreground;
+    }
+
     &.bash-success {
         color: ansi_green;
     }
 
     &.bash-error {
         color: ansi_red;
+    }
+
+    &.bash-interrupted {
+        color: ansi_yellow;
     }
 }
 
@@ -518,6 +554,24 @@ StatusMessage {
     height: auto;
 }
 
+.tool-result-widget Markdown,
+.tool-approval-widget Markdown {
+    padding: 0;
+    margin: 0;
+}
+
+.tool-result-widget Markdown > *,
+.tool-approval-widget Markdown > * {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.tool-result-widget Markdown MarkdownFence,
+.tool-approval-widget Markdown MarkdownFence {
+    margin: 0;
+    padding: 0;
+}
+
 .tool-call-detail,
 .tool-result-detail {
     height: auto;
@@ -614,7 +668,8 @@ StatusMessage {
 .loading-hint {
     width: auto;
     height: auto;
-    color: $foreground;
+    color: ansi_bright_black;
+
 }
 
 .history-load-more-message {
@@ -644,7 +699,7 @@ StatusMessage {
 
 }
 
-#config-app {
+#config-app, #voice-app, #mcp-app, #connectorauth-app {
     width: 100%;
     height: auto;
     background: transparent;
@@ -653,7 +708,7 @@ StatusMessage {
     margin: 0;
 }
 
-#config-content {
+#config-content, #voice-content, #mcp-content, #connectorauth-content {
     width: 100%;
     height: auto;
 }
@@ -664,41 +719,18 @@ StatusMessage {
     color: ansi_blue;
 }
 
-.settings-option {
-    height: auto;
-    color: ansi_default;
+#config-options, #mcp-options, #connectorauth-options {
+    width: 100%;
+    max-height: 50vh;
+    border: none;
 }
 
-.settings-cursor-selected {
-    color: ansi_blue;
-    text-style: bold;
+#config-options:focus, #mcp-options:focus, #connectorauth-options:focus {
+    border: none;
 }
 
-.settings-label-selected {
-    color: ansi_default;
-    text-style: bold;
-}
-
-.settings-value-toggle-on-selected {
-    color: ansi_green;
-    text-style: bold;
-}
-
-.settings-value-toggle-on-unselected {
-    color: ansi_green;
-}
-
-.settings-value-toggle-off {
-    color: ansi_bright_black;
-}
-
-.settings-value-cycle-selected {
-    color: ansi_blue;
-    text-style: bold;
-}
-
-.settings-value-cycle-unselected {
-    color: ansi_blue;
+#connectorauth-detail {
+    margin: 1 0;
 }
 
 .settings-help {
@@ -762,7 +794,7 @@ StatusMessage {
 .approval-title {
     height: auto;
     text-style: bold;
-    color: ansi_yellow;
+    color: ansi_bright_yellow;
 }
 
 .approval-tool-info-container {
@@ -784,6 +816,11 @@ StatusMessage {
 .approval-option {
     height: auto;
     color: ansi_default;
+    margin-bottom: 1;
+
+    &:last-of-type {
+        margin-bottom: 0;
+    }
 }
 
 .approval-cursor-selected {
@@ -793,14 +830,14 @@ StatusMessage {
     }
 
     &.approval-option-no {
-        color: ansi_red;
+        color: ansi_bright_red;
         text-style: bold;
     }
 }
 
 .approval-option-selected {
     &.approval-option-yes {
-        color: ansi_green;
+        color: ansi_white;
     }
 
     &.approval-option-no {
@@ -815,7 +852,7 @@ StatusMessage {
 
 .approval-description {
     height: auto;
-    color: ansi_default;
+    color: ansi_bright_black;
 }
 
 .code-block {
@@ -838,6 +875,10 @@ StatusMessage {
 #question-content {
     width: 100%;
     height: auto;
+}
+
+#question-content.question-content-docked {
+    dock: bottom;
 }
 
 .question-tabs {
@@ -900,6 +941,28 @@ StatusMessage {
     margin-top: 1;
 }
 
+.question-content-preview {
+    width: 100%;
+    height: auto;
+    max-height: 50vh;
+    border: none;
+    border-left: wide ansi_bright_black;
+    padding: 0 0 0 1;
+    margin-bottom: 1;
+}
+
+.question-content-preview-text {
+    width: 100%;
+    height: auto;
+    color: ansi_default;
+    padding: 0;
+    margin: 0;
+
+    & > MarkdownBlock:last-child {
+        margin-bottom: 0;
+    }
+}
+
 ExpandingBorder {
     width: auto;
     height: 100%;
@@ -914,6 +977,14 @@ ContextProgress {
     padding: 0;
     margin: 0;
     color: ansi_bright_black;
+}
+
+NarratorStatus {
+    width: auto;
+    height: auto;
+    background: transparent;
+    padding: 0;
+    margin: 0;
 }
 
 #banner-container {
@@ -959,6 +1030,10 @@ ContextProgress {
     width: auto;
 }
 
+#banner-user-plan {
+    width: auto;
+}
+
 #banner-meta-counts {
     width: auto;
 }
@@ -981,11 +1056,11 @@ ContextProgress {
         padding: 0 0 0 1;
         margin: 0;
 
-        & > *:first-child {
+        & > MarkdownBlock:first-child {
             margin-top: 0;
         }
 
-        & > *:last-child {
+        & > MarkdownBlock:last-child {
             margin-bottom: 0;
         }
 
@@ -1041,4 +1116,218 @@ ContextProgress {
     height: auto;
     color: ansi_bright_black;
     margin-top: 1;
+}
+
+/* Debug Console */
+
+#debug-console {
+    dock: right;
+    width: 40%;
+    max-width: 80;
+    min-width: 40;
+    height: 100%;
+    background: transparent;
+    border-left: solid ansi_bright_black;
+    padding: 0 1;
+}
+
+#debug-console-header {
+    width: 100%;
+    height: auto;
+    color: ansi_default;
+    padding: 0 0 1 0;
+    text-align: left;
+}
+
+#debug-console-log {
+    width: 100%;
+    height: 1fr;
+    background: transparent;
+    overflow-x: hidden;
+    scrollbar-size: 1 1;
+}
+
+#modelpicker-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid ansi_bright_black;
+    padding: 0 1;
+    margin: 0;
+}
+
+#modelpicker-content {
+    width: 100%;
+    height: auto;
+}
+
+.modelpicker-title {
+    height: auto;
+    text-style: bold;
+    color: ansi_blue;
+}
+
+#modelpicker-options {
+    width: 100%;
+    max-height: 50vh;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    border: none;
+}
+
+#modelpicker-options:focus {
+    border: none;
+}
+
+.modelpicker-help {
+    width: 100%;
+    height: auto;
+    color: ansi_bright_black;
+    margin-top: 1;
+}
+
+#thinkingpicker-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid ansi_bright_black;
+    padding: 0 1;
+    margin: 0;
+}
+
+#thinkingpicker-content {
+    width: 100%;
+    height: auto;
+}
+
+.thinkingpicker-title {
+    height: auto;
+    text-style: bold;
+    color: ansi_blue;
+}
+
+#thinkingpicker-options {
+    width: 100%;
+    max-height: 50vh;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    border: none;
+}
+
+#thinkingpicker-options:focus {
+    border: none;
+}
+
+.thinkingpicker-help {
+    width: 100%;
+    height: auto;
+    color: ansi_bright_black;
+    margin-top: 1;
+}
+
+FeedbackBar {
+    width: auto;
+    height: auto;
+    margin-left: 1;
+}
+
+.user-message.rewind-selected {
+    .user-message-content {
+        text-style: bold reverse;
+    }
+}
+
+#rewind-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid ansi_bright_black;
+    padding: 0 1;
+    margin: 0;
+}
+
+#rewind-content {
+    width: 100%;
+    height: auto;
+}
+
+.rewind-title {
+    height: auto;
+    text-style: bold;
+    color: ansi_blue;
+}
+
+.rewind-option {
+    height: auto;
+    color: ansi_default;
+}
+
+.rewind-cursor-selected {
+    color: ansi_blue;
+    text-style: bold;
+}
+
+.rewind-option-unselected {
+    color: ansi_default;
+}
+
+.rewind-help {
+    height: auto;
+    color: ansi_bright_black;
+}
+
+#feedback-text {
+    width: auto;
+    height: auto;
+    color: ansi_default;
+}
+
+.hook-system-message {
+    height: auto;
+    width: 100%;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.hook-run-container {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+}
+
+.hook-run-container:empty {
+    display: none;
+}
+
+.hook-system-container {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+.hook-system-icon {
+    width: auto;
+    height: 1;
+    padding: 0 1 0 0;
+}
+
+.hook-system-content {
+    width: 1fr;
+    height: auto;
+    max-height: 3;
+    overflow: hidden;
+    color: ansi_bright_black;
+}
+
+.hook-severity-ok .hook-system-icon {
+    color: ansi_green;
+}
+
+.hook-severity-warning .hook-system-icon {
+    color: ansi_yellow;
+}
+
+.hook-severity-error .hook-system-icon {
+    color: ansi_red;
 }

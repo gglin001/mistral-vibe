@@ -17,8 +17,12 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils import kill_async_subprocess
+from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -31,6 +35,10 @@ class GrepBackend(StrEnum):
 
 class GrepToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
+    sensitive_patterns: list[str] = Field(
+        default=["**/.env", "**/.env.*"],
+        description="File patterns that trigger ASK even when permission is ALWAYS.",
+    )
 
     max_output_bytes: int = Field(
         default=64_000, description="Hard cap for the total size of matched lines."
@@ -86,12 +94,57 @@ class GrepArgs(BaseModel):
     )
 
 
+class GrepMatch(BaseModel):
+    path: str
+    line: int | None = None
+
+    @classmethod
+    def from_output_line(cls, raw: str) -> GrepMatch | None:
+        """Parse a single grep/rg output line in `file:line:content` format.
+
+        Handles Windows drive-letter paths like ``C:\\repo\\file.py:10:match``
+        by skipping a single-letter first segment.
+        """
+        parts = raw.split(":", 3)
+        MIN_MATCH_PARTS = 2
+        if len(parts) < MIN_MATCH_PARTS:
+            return None
+
+        # Windows drive letter: first part is a single letter (e.g. "C")
+        MIN_WINDOWS_PARTS = 3
+        is_windows_path = (
+            len(parts[0]) == 1
+            and parts[0].isalpha()
+            and len(parts) >= MIN_WINDOWS_PARTS
+        )
+        if is_windows_path:
+            file_path = f"{parts[0]}:{parts[1]}"
+            line_str = parts[2]
+        else:
+            file_path = parts[0]
+            line_str = parts[1]
+
+        try:
+            line_num = int(line_str) if line_str else None
+        except (ValueError, TypeError):
+            line_num = None
+        return cls(path=str(Path(file_path).resolve()), line=line_num)
+
+
 class GrepResult(BaseModel):
     matches: str
     match_count: int
     was_truncated: bool = Field(
         description="True if output was cut short by max_matches or max_output_bytes."
     )
+
+    @property
+    def parsed_matches(self) -> list[GrepMatch]:
+        results: list[GrepMatch] = []
+        for line in self.matches.splitlines():
+            if match := GrepMatch.from_output_line(line):
+                results.append(match)
+        return results
 
 
 class Grep(
@@ -102,6 +155,16 @@ class Grep(
         "Recursively search files for a regex pattern using ripgrep (rg) or grep. "
         "Respects .gitignore and .codeignore files by default when using ripgrep."
     )
+
+    def resolve_permission(self, args: GrepArgs) -> PermissionContext | None:
+        return resolve_file_tool_permission(
+            args.path,
+            tool_name=self.get_name(),
+            allowlist=self.config.allowlist,
+            denylist=self.config.denylist,
+            config_permission=self.config.permission,
+            sensitive_patterns=self.config.sensitive_patterns,
+        )
 
     def _detect_backend(self) -> GrepBackend:
         if shutil.which("rg"):
@@ -150,7 +213,7 @@ class Grep(
     def _load_codeignore_patterns(self, codeignore_path: Path) -> list[str]:
         patterns = []
         try:
-            content = codeignore_path.read_text("utf-8")
+            content = read_safe(codeignore_path).text
             for line in content.splitlines():
                 line = line.strip()
                 if line and not line.startswith("#"):
@@ -225,8 +288,7 @@ class Grep(
                     proc.communicate(), timeout=self.config.default_timeout
                 )
             except TimeoutError:
-                proc.kill()
-                await proc.wait()
+                await kill_async_subprocess(proc, kill_process_group=False)
                 raise ToolError(
                     f"Search timed out after {self.config.default_timeout}s"
                 )

@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
 
+from tests import TESTS_ROOT
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import (
     BUILTIN_AGENTS,
-    PLAN_AGENT_TOOLS,
+    CHAT,
     AgentProfile,
     AgentSafety,
     AgentType,
@@ -18,18 +19,9 @@ from vibe.core.agents.models import (
     _deep_merge,
 )
 from vibe.core.config import VibeConfig
-from vibe.core.paths.config_paths import ConfigPath
-from vibe.core.paths.global_paths import GlobalPath
+from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.tools.base import ToolPermission
-from vibe.core.types import (
-    FunctionCall,
-    LLMChunk,
-    LLMMessage,
-    LLMUsage,
-    Role,
-    ToolCall,
-    ToolResultEvent,
-)
+from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
 
 
 class TestDeepMerge:
@@ -166,10 +158,80 @@ class TestAgentProfile:
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
             BuiltinAgentName.AUTO_APPROVE,
+            BuiltinAgentName.LEAN,
         }
 
 
 class TestAgentApplyToConfig:
+    def test_profile_disabled_tools_are_merged_with_base_config(self) -> None:
+        base = VibeConfig(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_tools=["ask_user_question"],
+        )
+
+        result = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].apply_to_config(base)
+
+        assert set(result.disabled_tools) == {"ask_user_question", "exit_plan_mode"}
+
+    def test_profile_disabled_tools_preserve_user_disabled_tools(self) -> None:
+        base = VibeConfig(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_tools=["ask_user_question", "custom_tool"],
+        )
+
+        result = BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].apply_to_config(base)
+
+        assert set(result.disabled_tools) == {
+            "ask_user_question",
+            "custom_tool",
+            "exit_plan_mode",
+        }
+
+    def test_base_disabled_tools_are_filtered_from_profile_enabled_tools(self) -> None:
+        base = VibeConfig(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_tools=["ask_user_question"],
+        )
+
+        result = CHAT.apply_to_config(base)
+
+        assert "ask_user_question" not in result.enabled_tools
+        assert "grep" in result.enabled_tools
+        assert "read_file" in result.enabled_tools
+        assert "task" in result.enabled_tools
+
+    def test_base_disabled_tools_filter_supports_glob_patterns(self) -> None:
+        base = VibeConfig(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_tools=["ask_*"],
+        )
+        agent = AgentProfile(
+            name="custom",
+            display_name="Custom",
+            description="",
+            safety=AgentSafety.NEUTRAL,
+            overrides={"enabled_tools": ["grep", "ask_user_question", "ask_extra"]},
+        )
+
+        result = agent.apply_to_config(base)
+
+        assert result.enabled_tools == ["grep"]
+
+    def test_empty_base_disabled_tools_leaves_enabled_tools_untouched(self) -> None:
+        base = VibeConfig(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_tools=[],
+        )
+
+        result = CHAT.apply_to_config(base)
+
+        assert "ask_user_question" in result.enabled_tools
+
     def test_custom_prompt_found_in_global_when_missing_from_project(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -186,11 +248,18 @@ class TestAgentApplyToConfig:
         global_prompts.mkdir(parents=True)
         (global_prompts / "cc.md").write_text("Global custom prompt")
 
+        class _MockManager(HarnessFilesManager):
+            @property
+            def project_prompts_dirs(self) -> list[Path]:
+                return [project_prompts]
+
+            @property
+            def user_prompts_dirs(self) -> list[Path]:
+                return [global_prompts]
+
+        mock_manager = _MockManager(sources=("user",))
         monkeypatch.setattr(
-            "vibe.core.config.PROMPTS_DIR", ConfigPath(lambda: project_prompts)
-        )
-        monkeypatch.setattr(
-            "vibe.core.config.GLOBAL_PROMPTS_DIR", GlobalPath(lambda: global_prompts)
+            "vibe.core.config._settings.get_harness_files_manager", lambda: mock_manager
         )
 
         base = VibeConfig(include_project_context=False, include_prompt_detail=False)
@@ -205,19 +274,60 @@ class TestAgentApplyToConfig:
         assert result.system_prompt_id == "cc"
         assert result.system_prompt == "Global custom prompt"
 
+    def test_custom_prompt_overrides_builtin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Custom prompts in .vibe/prompts/ should override built-in prompts.
+
+        A user-provided explore.md (or any built-in prompt name) in the
+        project or user prompts directory must take priority over the
+        bundled SystemPrompt enum.
+        """
+        project_prompts = tmp_path / "project" / ".vibe" / "prompts"
+        project_prompts.mkdir(parents=True)
+        (project_prompts / "explore.md").write_text("My custom explore prompt")
+
+        class _MockManager(HarnessFilesManager):
+            @property
+            def project_prompts_dirs(self) -> list[Path]:
+                return [project_prompts]
+
+            @property
+            def user_prompts_dirs(self) -> list[Path]:
+                return []
+
+        mock_manager = _MockManager(sources=("user",))
+        monkeypatch.setattr(
+            "vibe.core.config._settings.get_harness_files_manager", lambda: mock_manager
+        )
+
+        config = VibeConfig(
+            system_prompt_id="explore",
+            include_project_context=False,
+            include_prompt_detail=False,
+        )
+        assert config.system_prompt == "My custom explore prompt"
+
 
 class TestAgentProfileOverrides:
-    def test_default_agent_has_no_overrides(self) -> None:
-        assert BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].overrides == {}
+    def test_default_agent_disables_exit_plan_mode(self) -> None:
+        overrides = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].overrides
+        assert "exit_plan_mode" in overrides.get("base_disabled", [])
 
-    def test_auto_approve_agent_sets_auto_approve(self) -> None:
+    def test_auto_approve_agent_sets_bypass_tool_permissions(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].overrides
-        assert overrides.get("auto_approve") is True
+        assert overrides.get("bypass_tool_permissions") is True
 
     def test_plan_agent_restricts_tools(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.PLAN].overrides
-        assert "enabled_tools" in overrides
-        assert overrides["enabled_tools"] == PLAN_AGENT_TOOLS
+        assert "tools" in overrides
+        tools = overrides["tools"]
+        assert "write_file" in tools
+        assert "search_replace" in tools
+        assert tools["write_file"]["permission"] == "never"
+        assert tools["search_replace"]["permission"] == "never"
+        assert len(tools["write_file"]["allowlist"]) > 0
+        assert len(tools["search_replace"]["allowlist"]) > 0
 
     def test_accept_edits_agent_sets_tool_permissions(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.ACCEPT_EDITS].overrides
@@ -233,9 +343,7 @@ class TestAgentManagerCycling:
     @pytest.fixture
     def base_config(self) -> VibeConfig:
         return build_test_vibe_config(
-            auto_compact_threshold=0,
-            include_project_context=False,
-            include_prompt_detail=False,
+            include_project_context=False, include_prompt_detail=False
         )
 
     @pytest.fixture
@@ -302,9 +410,7 @@ class TestAgentSwitchAgent:
     @pytest.fixture
     def base_config(self) -> VibeConfig:
         return build_test_vibe_config(
-            auto_compact_threshold=0,
-            include_project_context=False,
-            include_prompt_detail=False,
+            include_project_context=False, include_prompt_detail=False
         )
 
     @pytest.fixture
@@ -317,20 +423,25 @@ class TestAgentSwitchAgent:
         ])
 
     @pytest.mark.asyncio
-    async def test_switch_to_plan_agent_restricts_tools(
+    async def test_switch_to_plan_agent_has_tools_with_restricted_permissions(
         self, base_config: VibeConfig, backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
             config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
-        initial_tool_names = set(agent.tool_manager.available_tools.keys())
-        assert len(initial_tool_names) > len(PLAN_AGENT_TOOLS)
-
         await agent.switch_agent(BuiltinAgentName.PLAN)
 
         plan_tool_names = set(agent.tool_manager.available_tools.keys())
-        assert plan_tool_names == set(PLAN_AGENT_TOOLS)
+        # Plan mode now has all tools available but with restricted permissions
+        assert "write_file" in plan_tool_names
+        assert "search_replace" in plan_tool_names
+        assert "grep" in plan_tool_names
+        assert "read_file" in plan_tool_names
         assert agent.agent_profile.name == BuiltinAgentName.PLAN
+
+        # Verify write tools have "never" base permission
+        write_config = agent.tool_manager.get_tool_config("write_file")
+        assert write_config.permission == ToolPermission.NEVER
 
     @pytest.mark.asyncio
     async def test_switch_from_plan_to_default_restores_tools(
@@ -339,11 +450,12 @@ class TestAgentSwitchAgent:
         agent = build_test_agent_loop(
             config=base_config, agent_name=BuiltinAgentName.PLAN, backend=backend
         )
-        assert len(agent.tool_manager.available_tools) == len(PLAN_AGENT_TOOLS)
 
         await agent.switch_agent(BuiltinAgentName.DEFAULT)
 
-        assert len(agent.tool_manager.available_tools) > len(PLAN_AGENT_TOOLS)
+        # Write tools should revert to default ASK permission
+        write_config = agent.tool_manager.get_tool_config("write_file")
+        assert write_config.permission == ToolPermission.ASK
         assert agent.agent_profile.name == BuiltinAgentName.DEFAULT
 
     @pytest.mark.asyncio
@@ -392,9 +504,7 @@ class TestAcceptEditsAgent:
     async def test_accept_edits_agent_auto_approves_write_file(self) -> None:
         backend = FakeBackend([])
 
-        config = build_test_vibe_config(
-            auto_compact_threshold=0, enabled_tools=["write_file"]
-        )
+        config = build_test_vibe_config(enabled_tools=["write_file"])
         agent = build_test_agent_loop(
             config=config, agent_name=BuiltinAgentName.ACCEPT_EDITS, backend=backend
         )
@@ -406,9 +516,7 @@ class TestAcceptEditsAgent:
     async def test_accept_edits_agent_requires_approval_for_other_tools(self) -> None:
         backend = FakeBackend([])
 
-        config = build_test_vibe_config(
-            auto_compact_threshold=0, enabled_tools=["bash"]
-        )
+        config = build_test_vibe_config(enabled_tools=["bash"])
         agent = build_test_agent_loop(
             config=config, agent_name=BuiltinAgentName.ACCEPT_EDITS, backend=backend
         )
@@ -419,52 +527,36 @@ class TestAcceptEditsAgent:
 
 class TestPlanAgentToolRestriction:
     @pytest.mark.asyncio
-    async def test_plan_agent_only_exposes_read_tools_to_llm(self) -> None:
+    async def test_plan_agent_has_all_tools_with_restricted_write_permissions(
+        self,
+    ) -> None:
         backend = FakeBackend([
             LLMChunk(
                 message=LLMMessage(role=Role.assistant, content="ok"),
                 usage=LLMUsage(prompt_tokens=10, completion_tokens=5),
             )
         ])
-        config = build_test_vibe_config(auto_compact_threshold=0)
+        config = build_test_vibe_config()
         agent = build_test_agent_loop(
             config=config, agent_name=BuiltinAgentName.PLAN, backend=backend
         )
 
         tool_names = set(agent.tool_manager.available_tools.keys())
 
-        assert "bash" not in tool_names
-        assert "write_file" not in tool_names
-        assert "search_replace" not in tool_names
-        for plan_tool in PLAN_AGENT_TOOLS:
-            assert plan_tool in tool_names
+        # Plan mode now has all tools available
+        assert "grep" in tool_names
+        assert "read_file" in tool_names
+        assert "write_file" in tool_names
+        assert "search_replace" in tool_names
 
-    @pytest.mark.asyncio
-    async def test_plan_agent_rejects_non_plan_tool_call(self) -> None:
-        tool_call = ToolCall(
-            id="call_1",
-            index=0,
-            function=FunctionCall(name="bash", arguments='{"command": "ls"}'),
-        )
-        backend = FakeBackend([
-            mock_llm_chunk(content="Let me run bash", tool_calls=[tool_call]),
-            mock_llm_chunk(content="Tool not available"),
-        ])
+        # But write tools have restricted permissions
+        write_config = agent.tool_manager.get_tool_config("write_file")
+        assert write_config.permission == ToolPermission.NEVER
+        assert len(write_config.allowlist) > 0
 
-        config = build_test_vibe_config(auto_compact_threshold=0)
-        agent = build_test_agent_loop(
-            config=config, agent_name=BuiltinAgentName.PLAN, backend=backend
-        )
-
-        events = [ev async for ev in agent.act("Run ls")]
-
-        tool_result = next((e for e in events if isinstance(e, ToolResultEvent)), None)
-        assert tool_result is not None
-        assert tool_result.error is not None
-        assert (
-            "not found" in tool_result.error.lower()
-            or "error" in tool_result.error.lower()
-        )
+        sr_config = agent.tool_manager.get_tool_config("search_replace")
+        assert sr_config.permission == ToolPermission.NEVER
+        assert len(sr_config.allowlist) > 0
 
 
 class TestAgentManagerFiltering:
@@ -552,6 +644,26 @@ class TestAgentManagerFiltering:
         assert "auto-approve" in agents
         assert "explore" in agents
 
+    def test_install_required_agents_hidden_by_default(self) -> None:
+        config = build_test_vibe_config(
+            include_project_context=False, include_prompt_detail=False
+        )
+        manager = AgentManager(lambda: config)
+
+        agents = manager.available_agents
+        assert "lean" not in agents
+
+    def test_install_required_agents_visible_when_installed(self) -> None:
+        config = build_test_vibe_config(
+            include_project_context=False,
+            include_prompt_detail=False,
+            installed_agents=["lean"],
+        )
+        manager = AgentManager(lambda: config)
+
+        agents = manager.available_agents
+        assert "lean" in agents
+
     def test_get_subagents_respects_filtering(self) -> None:
         config = build_test_vibe_config(
             include_project_context=False,
@@ -577,11 +689,18 @@ class TestAgentLoopInitialization:
         custom_prompt_content = "CUSTOM_AGENT_PROMPT_MARKER"
         (global_prompts / "custom_agent.md").write_text(custom_prompt_content)
 
+        class _MockManager(HarnessFilesManager):
+            @property
+            def project_prompts_dirs(self) -> list[Path]:
+                return [project_prompts]
+
+            @property
+            def user_prompts_dirs(self) -> list[Path]:
+                return [global_prompts]
+
+        mock_manager = _MockManager(sources=("user",))
         monkeypatch.setattr(
-            "vibe.core.config.PROMPTS_DIR", ConfigPath(lambda: project_prompts)
-        )
-        monkeypatch.setattr(
-            "vibe.core.config.GLOBAL_PROMPTS_DIR", GlobalPath(lambda: global_prompts)
+            "vibe.core.config._settings.get_harness_files_manager", lambda: mock_manager
         )
 
         custom_agent = AgentProfile(
@@ -616,4 +735,23 @@ class TestAgentLoopInitialization:
         assert custom_prompt_content in system_message.content, (
             f"System message should contain custom prompt content. "
             f"Expected '{custom_prompt_content}' to be in system message."
+        )
+
+
+class TestActConsumersUseAclosing:
+    def test_no_bare_async_for_over_act(self) -> None:
+        vibe_pkg = TESTS_ROOT.parent / "vibe"
+        violations: list[str] = []
+        for path in vibe_pkg.rglob("*.py"):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.AsyncFor):
+                    continue
+                match node.iter:
+                    case ast.Call(func=ast.Attribute(attr="act")):
+                        violations.append(f"{path}:{node.lineno}")
+
+        assert not violations, (
+            "Bare `async for ... in .act()` found — wrap in "
+            "contextlib.aclosing(). See issue #569.\n" + "\n".join(violations)
         )

@@ -99,14 +99,12 @@ class TestLoadSession:
         }
 
         assert response.config_options is not None
-        assert len(response.config_options) == 2
-        assert response.config_options[0].root.id == "mode"
-        assert response.config_options[0].root.category == "mode"
-        assert response.config_options[0].root.current_value == BuiltinAgentName.DEFAULT
-        assert len(response.config_options[0].root.options) == 5
-        mode_option_values = {
-            opt.value for opt in response.config_options[0].root.options
-        }
+        assert len(response.config_options) == 3
+        assert response.config_options[0].id == "mode"
+        assert response.config_options[0].category == "mode"
+        assert response.config_options[0].current_value == BuiltinAgentName.DEFAULT
+        assert len(response.config_options[0].options) == 5
+        mode_option_values = {opt.value for opt in response.config_options[0].options}
         assert mode_option_values == {
             BuiltinAgentName.DEFAULT,
             BuiltinAgentName.CHAT,
@@ -114,14 +112,15 @@ class TestLoadSession:
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
         }
-        assert response.config_options[1].root.id == "model"
-        assert response.config_options[1].root.category == "model"
-        assert response.config_options[1].root.current_value == "devstral-latest"
-        assert len(response.config_options[1].root.options) == 2
-        model_option_values = {
-            opt.value for opt in response.config_options[1].root.options
-        }
+        assert response.config_options[1].id == "model"
+        assert response.config_options[1].category == "model"
+        assert response.config_options[1].current_value == "devstral-latest"
+        assert len(response.config_options[1].options) == 2
+        model_option_values = {opt.value for opt in response.config_options[1].options}
         assert model_option_values == {"devstral-latest", "devstral-small"}
+        assert response.config_options[2].id == "thinking"
+        assert response.config_options[2].category == "thinking"
+        assert response.config_options[2].current_value == "off"
 
     @pytest.mark.asyncio
     async def test_load_session_registers_session_with_original_id(
@@ -140,6 +139,7 @@ class TestLoadSession:
 
         assert session_id in acp_agent.sessions
         assert acp_agent.sessions[session_id].id == session_id
+        assert acp_agent.sessions[session_id].agent_loop.session_id == session_id
 
     @pytest.mark.asyncio
     async def test_load_session_injects_messages_into_agent_loop(
@@ -296,6 +296,42 @@ class TestLoadSession:
         assert thought_updates[0].update.content.text == "Let me think step by step..."
 
     @pytest.mark.asyncio
+    async def test_load_session_replays_reasoning_before_assistant_message(
+        self,
+        acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient],
+        temp_session_dir: Path,
+        create_test_session,
+    ) -> None:
+        acp_agent, client = acp_agent_with_session_config
+
+        session_id = "replay-order-1234"
+        cwd = str(Path.cwd())
+        messages = [
+            {"role": "user", "content": "Think about this"},
+            {
+                "role": "assistant",
+                "content": "Here is my answer",
+                "reasoning_content": "Let me think step by step...",
+            },
+        ]
+        create_test_session(temp_session_dir, session_id, cwd, messages=messages)
+
+        await acp_agent.load_session(cwd=cwd, mcp_servers=[], session_id=session_id)
+
+        response_updates = [
+            update.update
+            for update in client._session_updates
+            if isinstance(update.update, (AgentThoughtChunk, AgentMessageChunk))
+        ]
+
+        assert [type(update) for update in response_updates] == [
+            AgentThoughtChunk,
+            AgentMessageChunk,
+        ]
+        assert response_updates[0].content.text == "Let me think step by step..."
+        assert response_updates[1].content.text == "Here is my answer"
+
+    @pytest.mark.asyncio
     async def test_load_session_not_found_raises_error(
         self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
     ) -> None:
@@ -342,3 +378,129 @@ class TestLoadSession:
         assert user_updates[1].update.content.text == "Second message"
         assert agent_updates[0].update.content.text == "First response"
         assert agent_updates[1].update.content.text == "Second response"
+
+    @pytest.mark.asyncio
+    async def test_load_session_restores_agent_loop_session_identity(
+        self,
+        acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient],
+        temp_session_dir: Path,
+        create_test_session,
+    ) -> None:
+        acp_agent, _client = acp_agent_with_session_config
+
+        session_id = "restore-id-12345678"
+        parent_session_id = "parent-id-87654321"
+        cwd = str(Path.cwd())
+        session_dir = create_test_session(
+            temp_session_dir, session_id, cwd, parent_session_id=parent_session_id
+        )
+
+        await acp_agent.load_session(cwd=cwd, mcp_servers=[], session_id=session_id)
+
+        agent_loop = acp_agent.sessions[session_id].agent_loop
+
+        assert agent_loop.session_id == session_id
+        assert agent_loop.parent_session_id == parent_session_id
+        assert agent_loop.session_logger.session_id == session_id
+        assert agent_loop.session_logger.session_dir == session_dir
+        assert agent_loop.session_logger.session_metadata is not None
+        assert (
+            agent_loop.session_logger.session_metadata.parent_session_id
+            == parent_session_id
+        )
+
+    @pytest.mark.asyncio
+    async def test_replay_user_message_has_message_id(
+        self,
+        acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient],
+        temp_session_dir: Path,
+        create_test_session,
+    ) -> None:
+        acp_agent, client = acp_agent_with_session_config
+
+        session_id = "msg-id-usr-1234567"
+        cwd = str(Path.cwd())
+        message_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        messages = [{"role": "user", "content": "Hello", "message_id": message_id}]
+        create_test_session(temp_session_dir, session_id, cwd, messages=messages)
+
+        await acp_agent.load_session(cwd=cwd, mcp_servers=[], session_id=session_id)
+
+        user_updates = [
+            u for u in client._session_updates if isinstance(u.update, UserMessageChunk)
+        ]
+        assert len(user_updates) == 1
+        assert user_updates[0].update.message_id == message_id
+
+    @pytest.mark.asyncio
+    async def test_replay_agent_message_has_message_id(
+        self,
+        acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient],
+        temp_session_dir: Path,
+        create_test_session,
+    ) -> None:
+        acp_agent, client = acp_agent_with_session_config
+
+        session_id = "msg-id-ast-1234567"
+        cwd = str(Path.cwd())
+        message_id = "11111111-2222-3333-4444-555555555555"
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello!", "message_id": message_id},
+        ]
+        create_test_session(temp_session_dir, session_id, cwd, messages=messages)
+
+        await acp_agent.load_session(cwd=cwd, mcp_servers=[], session_id=session_id)
+
+        agent_updates = [
+            u
+            for u in client._session_updates
+            if isinstance(u.update, AgentMessageChunk)
+        ]
+        assert len(agent_updates) == 1
+        assert agent_updates[0].update.message_id == message_id
+
+    @pytest.mark.asyncio
+    async def test_replay_reasoning_has_different_message_id_than_agent_message(
+        self,
+        acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient],
+        temp_session_dir: Path,
+        create_test_session,
+    ) -> None:
+        acp_agent, client = acp_agent_with_session_config
+
+        session_id = "msg-id-rsn-1234567"
+        cwd = str(Path.cwd())
+        agent_message_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        reasoning_message_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        messages = [
+            {"role": "user", "content": "Think about this"},
+            {
+                "role": "assistant",
+                "content": "Here is my answer",
+                "message_id": agent_message_id,
+                "reasoning_content": "Let me think...",
+                "reasoning_message_id": reasoning_message_id,
+            },
+        ]
+        create_test_session(temp_session_dir, session_id, cwd, messages=messages)
+
+        await acp_agent.load_session(cwd=cwd, mcp_servers=[], session_id=session_id)
+
+        agent_updates = [
+            u
+            for u in client._session_updates
+            if isinstance(u.update, AgentMessageChunk)
+        ]
+        thought_updates = [
+            u
+            for u in client._session_updates
+            if isinstance(u.update, AgentThoughtChunk)
+        ]
+        assert len(agent_updates) == 1
+        assert len(thought_updates) == 1
+        assert agent_updates[0].update.message_id == agent_message_id
+        assert thought_updates[0].update.message_id == reasoning_message_id
+        assert (
+            agent_updates[0].update.message_id != thought_updates[0].update.message_id
+        )

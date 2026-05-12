@@ -10,7 +10,8 @@ import httpx
 
 from vibe.core.llm.backend.anthropic import AnthropicAdapter
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
-from vibe.core.llm.backend.vertex import VertexAnthropicAdapter
+from vibe.core.llm.backend.openai_responses import OpenAIResponsesAdapter
+from vibe.core.llm.backend.reasoning_adapter import ReasoningAdapter
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.llm.message_utils import merge_consecutive_user_messages
 from vibe.core.types import (
@@ -22,6 +23,7 @@ from vibe.core.types import (
     StrToolChoice,
 )
 from vibe.core.utils import async_generator_retry, async_retry
+from vibe.core.utils.http import build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
@@ -78,7 +80,7 @@ class OpenAIAdapter(APIAdapter):
             msg_dict["reasoning_content"] = msg_dict.pop(field_name)
         return msg_dict
 
-    def prepare_request(  # noqa: PLR0913
+    def prepare_request(
         self,
         *,
         model_name: str,
@@ -96,7 +98,16 @@ class OpenAIAdapter(APIAdapter):
         field_name = provider.reasoning_field_name
         converted_messages = [
             self._reasoning_to_api(
-                msg.model_dump(exclude_none=True, exclude={"message_id"}), field_name
+                msg.model_dump(
+                    exclude_none=True,
+                    exclude={
+                        "message_id",
+                        "reasoning_message_id",
+                        "reasoning_state",
+                        "injected",
+                    },
+                ),
+                field_name,
             )
             for msg in merged_messages
         ]
@@ -155,11 +166,25 @@ class OpenAIAdapter(APIAdapter):
         return LLMChunk(message=message, usage=usage)
 
 
-ADAPTERS: dict[str, APIAdapter] = {
+_ADAPTERS: dict[str, APIAdapter] = {
     "openai": OpenAIAdapter(),
     "anthropic": AnthropicAdapter(),
-    "vertex-anthropic": VertexAnthropicAdapter(),
+    "reasoning": ReasoningAdapter(),
 }
+
+
+def _get_adapter(api_style: str) -> APIAdapter:
+    """Load the adapter for the given API style."""
+    if api_style == "openai-responses":
+        return OpenAIResponsesAdapter()
+    if api_style not in _ADAPTERS:
+        if api_style == "vertex-anthropic":
+            from vibe.core.llm.backend.vertex import VertexAnthropicAdapter
+
+            _ADAPTERS["vertex-anthropic"] = VertexAnthropicAdapter()
+        else:
+            raise KeyError(api_style)
+    return _ADAPTERS[api_style]
 
 
 class GenericBackend:
@@ -185,6 +210,7 @@ class GenericBackend:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout),
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+                verify=build_ssl_context(),
             )
         return self
 
@@ -203,6 +229,7 @@ class GenericBackend:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout),
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+                verify=build_ssl_context(),
             )
             self._owns_client = True
         return self._client
@@ -226,7 +253,7 @@ class GenericBackend:
         )
 
         api_style = getattr(self._provider, "api_style", "openai")
-        adapter = ADAPTERS[api_style]
+        adapter = _get_adapter(api_style)
 
         req = adapter.prepare_request(
             model_name=model.name,
@@ -256,8 +283,7 @@ class GenericBackend:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=url,
-                response=e.response,
-                headers=e.response.headers,
+                error=e,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -295,7 +321,7 @@ class GenericBackend:
         )
 
         api_style = getattr(self._provider, "api_style", "openai")
-        adapter = ADAPTERS[api_style]
+        adapter = _get_adapter(api_style)
 
         req = adapter.prepare_request(
             model_name=model.name,
@@ -325,8 +351,7 @@ class GenericBackend:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=url,
-                response=e.response,
-                headers=e.response.headers,
+                error=e,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,

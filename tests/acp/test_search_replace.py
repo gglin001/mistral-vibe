@@ -85,7 +85,7 @@ def acp_search_replace_tool(
         session_id="test_session_123",
         tool_call_id="test_tool_call_456",
     )
-    return SearchReplace(config=config, state=state)
+    return SearchReplace(config_getter=lambda: config, state=state)
 
 
 class TestAcpSearchReplaceBasic:
@@ -139,7 +139,7 @@ class TestAcpSearchReplaceExecution:
         monkeypatch.chdir(tmp_path)
         config = SearchReplaceConfig(create_backup=True)
         tool = SearchReplace(
-            config=config,
+            config_getter=lambda: config,
             state=AcpSearchReplaceState.model_construct(
                 client=mock_client, session_id="test_session", tool_call_id="test_call"
             ),
@@ -169,7 +169,7 @@ class TestAcpSearchReplaceExecution:
         mock_client._read_error = RuntimeError("File not found")
 
         tool = SearchReplace(
-            config=SearchReplaceConfig(),
+            config_getter=lambda: SearchReplaceConfig(),
             state=AcpSearchReplaceState.model_construct(
                 client=mock_client, session_id="test_session", tool_call_id="test_call"
             ),
@@ -200,7 +200,7 @@ class TestAcpSearchReplaceExecution:
         mock_client._file_content = "old"  # Update mock to return correct content
 
         tool = SearchReplace(
-            config=SearchReplaceConfig(),
+            config_getter=lambda: SearchReplaceConfig(),
             state=AcpSearchReplaceState.model_construct(
                 client=mock_client, session_id="test_session", tool_call_id="test_call"
             ),
@@ -243,7 +243,7 @@ class TestAcpSearchReplaceExecution:
         test_file = tmp_path / "test.txt"
         test_file.touch()
         tool = SearchReplace(
-            config=SearchReplaceConfig(),
+            config_getter=lambda: SearchReplaceConfig(),
             state=AcpSearchReplaceState.model_construct(
                 client=client, session_id=session_id, tool_call_id="test_call"
             ),
@@ -288,7 +288,7 @@ class TestAcpSearchReplaceSessionUpdates:
         assert update.content[0].new_text == "new text"
         assert update.locations is not None
         assert len(update.locations) == 1
-        assert update.locations[0].path == "/tmp/test.txt"
+        assert update.locations[0].path == str(Path("/tmp/test.txt").resolve())
 
     def test_tool_call_session_update_invalid_args(self) -> None:
         class InvalidArgs:
@@ -302,7 +302,8 @@ class TestAcpSearchReplaceSessionUpdates:
         )
 
         update = SearchReplace.tool_call_session_update(event)
-        assert update is None
+        assert update is not None
+        assert update.title == "search_replace"
 
     def test_tool_result_session_update(self) -> None:
         search_replace_content = (
@@ -337,7 +338,7 @@ class TestAcpSearchReplaceSessionUpdates:
         assert update.content[0].new_text == "new text"
         assert update.locations is not None
         assert len(update.locations) == 1
-        assert update.locations[0].path == "/tmp/test.txt"
+        assert update.locations[0].path == str(Path("/tmp/test.txt").resolve())
 
     def test_tool_result_session_update_invalid_result(self) -> None:
         class InvalidResult:
@@ -351,4 +352,5 @@ class TestAcpSearchReplaceSessionUpdates:
         )
 
         update = SearchReplace.tool_result_session_update(event)
-        assert update is None
+        assert update is not None
+        assert update.status == "failed"

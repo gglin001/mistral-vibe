@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Generator
-import fnmatch
+from concurrent.futures import ThreadPoolExecutor
 import html
 import os
 from pathlib import Path
+from string import Template
 import subprocess
 import sys
-import time
 from typing import TYPE_CHECKING
 
+from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.paths import VIBE_HOME
 from vibe.core.prompts import UtilityPrompt
-from vibe.core.trusted_folders import AGENTS_MD_FILENAMES, trusted_folders_manager
 from vibe.core.utils import is_dangerous_directory, is_windows
 
 if TYPE_CHECKING:
@@ -20,17 +20,7 @@ if TYPE_CHECKING:
     from vibe.core.skills.manager import SkillManager
     from vibe.core.tools.manager import ToolManager
 
-
-def _load_project_doc(workdir: Path, max_bytes: int) -> str:
-    if not trusted_folders_manager.is_trusted(workdir):
-        return ""
-    for name in AGENTS_MD_FILENAMES:
-        path = workdir / name
-        try:
-            return path.read_text("utf-8", errors="ignore")[:max_bytes]
-        except (FileNotFoundError, OSError):
-            continue
-    return ""
+_git_status_cache: dict[Path, str] = {}
 
 
 class ProjectContextProvider:
@@ -39,240 +29,88 @@ class ProjectContextProvider:
     ) -> None:
         self.root_path = Path(root_path).resolve()
         self.config = config
-        self.gitignore_patterns = self._load_gitignore_patterns()
-        self._file_count = 0
-        self._start_time = 0.0
-
-    def _load_gitignore_patterns(self) -> list[str]:
-        gitignore_path = self.root_path / ".gitignore"
-        patterns = []
-
-        if gitignore_path.exists():
-            try:
-                patterns.extend(
-                    line.strip()
-                    for line in gitignore_path.read_text(encoding="utf-8").splitlines()
-                    if line.strip() and not line.startswith("#")
-                )
-            except Exception as e:
-                print(f"Warning: Could not read .gitignore: {e}", file=sys.stderr)
-
-        default_patterns = [
-            ".git",
-            ".git/*",
-            "*.pyc",
-            "__pycache__",
-            "node_modules",
-            "node_modules/*",
-            ".env",
-            ".DS_Store",
-            "*.log",
-            ".vscode/settings.json",
-            ".idea/*",
-            "dist",
-            "build",
-            "target",
-            ".next",
-            ".nuxt",
-            "coverage",
-            ".nyc_output",
-            "*.egg-info",
-            ".pytest_cache",
-            ".tox",
-            "vendor",
-            "third_party",
-            "deps",
-            "*.min.js",
-            "*.min.css",
-            "*.bundle.js",
-            "*.chunk.js",
-            ".cache",
-            "tmp",
-            "temp",
-            "logs",
-        ]
-
-        return patterns + default_patterns
-
-    def _is_ignored(self, path: Path) -> bool:
-        try:
-            relative_path = path.relative_to(self.root_path)
-            path_str = str(relative_path)
-
-            for pattern in self.gitignore_patterns:
-                if pattern.endswith("/"):
-                    if path.is_dir() and fnmatch.fnmatch(f"{path_str}/", pattern):
-                        return True
-                elif fnmatch.fnmatch(path_str, pattern):
-                    return True
-                elif "*" in pattern or "?" in pattern:
-                    if fnmatch.fnmatch(path_str, pattern):
-                        return True
-
-            return False
-        except (ValueError, OSError):
-            return True
-
-    def _should_stop(self) -> bool:
-        return (
-            self._file_count >= self.config.max_files
-            or (time.time() - self._start_time) > self.config.timeout_seconds
-        )
-
-    def _build_tree_structure_iterative(self) -> Generator[str]:
-        self._start_time = time.time()
-        self._file_count = 0
-
-        yield from self._process_directory(self.root_path, "", 0, is_root=True)
-
-    def _process_directory(
-        self, path: Path, prefix: str, depth: int, is_root: bool = False
-    ) -> Generator[str]:
-        if depth > self.config.max_depth or self._should_stop():
-            return
-
-        try:
-            all_items = list(path.iterdir())
-            items = [item for item in all_items if not self._is_ignored(item)]
-
-            items.sort(key=lambda p: (not p.is_dir(), p.name.lower()))
-
-            show_truncation = len(items) > self.config.max_dirs_per_level
-            if show_truncation:
-                items = items[: self.config.max_dirs_per_level]
-
-            for i, item in enumerate(items):
-                if self._should_stop():
-                    break
-
-                is_last = i == len(items) - 1 and not show_truncation
-                connector = "└── " if is_last else "├── "
-                name = f"{item.name}{'/' if item.is_dir() else ''}"
-
-                yield f"{prefix}{connector}{name}"
-                self._file_count += 1
-
-                if item.is_dir() and depth < self.config.max_depth:
-                    child_prefix = prefix + ("    " if is_last else "│   ")
-                    yield from self._process_directory(item, child_prefix, depth + 1)
-
-            if show_truncation and not self._should_stop():
-                remaining = len(all_items) - len(items)
-                yield f"{prefix}└── ... ({remaining} more items)"
-
-        except (PermissionError, OSError):
-            pass
-
-    def get_directory_structure(self) -> str:
-        lines = []
-        header = f"Directory structure of {self.root_path.name} (depth≤{self.config.max_depth}, max {self.config.max_files} items):\n"
-
-        try:
-            for line in self._build_tree_structure_iterative():
-                lines.append(line)
-
-                current_text = header + "\n".join(lines)
-                if (
-                    len(current_text)
-                    > self.config.max_chars - self.config.truncation_buffer
-                ):
-                    break
-
-        except Exception as e:
-            lines.append(f"Error building structure: {e}")
-
-        structure = header + "\n".join(lines)
-
-        if self._file_count >= self.config.max_files:
-            structure += f"\n... (truncated at {self.config.max_files} files limit)"
-        elif (time.time() - self._start_time) > self.config.timeout_seconds:
-            structure += (
-                f"\n... (truncated due to {self.config.timeout_seconds}s timeout)"
-            )
-        elif len(structure) > self.config.max_chars:
-            structure += f"\n... (truncated at {self.config.max_chars} characters)"
-
-        return structure
 
     def get_git_status(self) -> str:
+        if self.root_path in _git_status_cache:
+            return _git_status_cache[self.root_path]
+
+        result = self._fetch_git_status()
+        _git_status_cache[self.root_path] = result
+        return result
+
+    def _run_git(
+        self, args: list[str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "--no-optional-locks", *args],
+            capture_output=True,
+            check=True,
+            cwd=self.root_path,
+            stdin=subprocess.DEVNULL if is_windows() else None,
+            text=True,
+            timeout=timeout,
+        )
+
+    @staticmethod
+    def _format_git_status(status_output: str) -> str:
+        if not status_output:
+            return "(clean)"
+        status_lines = status_output.splitlines()
+        MAX_GIT_STATUS_SIZE = 50
+        if len(status_lines) > MAX_GIT_STATUS_SIZE:
+            return f"({len(status_lines)} changes - use 'git status' for details)"
+        return f"({len(status_lines)} changes)"
+
+    @staticmethod
+    def _parse_git_log(log_output: str) -> list[str]:
+        recent_commits: list[str] = []
+        for line in log_output.split("\n"):
+            if not (line := line.strip()):
+                continue
+            if " " in line:
+                commit_hash, commit_msg = line.split(" ", 1)
+                if (
+                    "(" in commit_msg
+                    and ")" in commit_msg
+                    and (paren_index := commit_msg.rfind("(")) > 0
+                ):
+                    commit_msg = commit_msg[:paren_index].strip()
+                recent_commits.append(f"{commit_hash} {commit_msg}")
+            else:
+                recent_commits.append(line)
+        return recent_commits
+
+    def _fetch_git_status(self) -> str:
         try:
             timeout = min(self.config.timeout_seconds, 10.0)
             num_commits = self.config.default_commit_count
 
-            current_branch = subprocess.run(
-                ["git", "branch", "--show-current"],
-                capture_output=True,
-                check=True,
-                cwd=self.root_path,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=timeout,
-            ).stdout.strip()
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                branch_future = pool.submit(
+                    self._run_git, ["branch", "--show-current"], timeout
+                )
+                remote_future = pool.submit(self._run_git, ["branch", "-r"], timeout)
+                status_future = pool.submit(
+                    self._run_git, ["status", "--porcelain"], timeout
+                )
+                log_future = pool.submit(
+                    self._run_git,
+                    ["log", "--oneline", f"-{num_commits}", "--decorate"],
+                    timeout,
+                )
+
+            current_branch = branch_future.result().stdout.strip()
 
             main_branch = "main"
             try:
-                branches_output = subprocess.run(
-                    ["git", "branch", "-r"],
-                    capture_output=True,
-                    check=True,
-                    cwd=self.root_path,
-                    stdin=subprocess.DEVNULL if is_windows() else None,
-                    text=True,
-                    timeout=timeout,
-                ).stdout
+                branches_output = remote_future.result().stdout
                 if "origin/master" in branches_output:
                     main_branch = "master"
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 pass
 
-            status_output = subprocess.run(
-                ["git", "status", "--porcelain"],
-                capture_output=True,
-                check=True,
-                cwd=self.root_path,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=timeout,
-            ).stdout.strip()
-
-            if status_output:
-                status_lines = status_output.splitlines()
-                MAX_GIT_STATUS_SIZE = 50
-                if len(status_lines) > MAX_GIT_STATUS_SIZE:
-                    status = (
-                        f"({len(status_lines)} changes - use 'git status' for details)"
-                    )
-                else:
-                    status = f"({len(status_lines)} changes)"
-            else:
-                status = "(clean)"
-
-            log_output = subprocess.run(
-                ["git", "log", "--oneline", f"-{num_commits}", "--decorate"],
-                capture_output=True,
-                check=True,
-                cwd=self.root_path,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=timeout,
-            ).stdout.strip()
-
-            recent_commits = []
-            for line in log_output.split("\n"):
-                if not (line := line.strip()):
-                    continue
-
-                if " " in line:
-                    commit_hash, commit_msg = line.split(" ", 1)
-                    if (
-                        "(" in commit_msg
-                        and ")" in commit_msg
-                        and (paren_index := commit_msg.rfind("(")) > 0
-                    ):
-                        commit_msg = commit_msg[:paren_index].strip()
-                    recent_commits.append(f"{commit_hash} {commit_msg}")
-                else:
-                    recent_commits.append(line)
+            status = self._format_git_status(status_future.result().stdout.strip())
+            recent_commits = self._parse_git_log(log_future.result().stdout.strip())
 
             git_info_parts = [
                 f"Current branch: {current_branch}",
@@ -293,23 +131,12 @@ class ProjectContextProvider:
         except Exception as e:
             return f"Error getting git status: {e}"
 
-    def get_full_context(self) -> str:
-        structure = self.get_directory_structure()
-        git_status = self.get_git_status()
-
-        large_repo_warning = ""
-        if len(structure) >= self.config.max_chars - self.config.truncation_buffer:
-            large_repo_warning = (
-                f" Large repository detected - showing summary view with depth limit {self.config.max_depth}. "
-                f"Use the LS tool (passing a specific path), Bash tool, and other tools to explore nested directories in detail."
-            )
+    def get_full_context(self, *, include_git_status: bool = True) -> str:
+        git_status = self.get_git_status() if include_git_status else ""
 
         template = UtilityPrompt.PROJECT_CONTEXT.read()
-        return template.format(
-            large_repo_warning=large_repo_warning,
-            structure=structure,
-            abs_path=self.root_path,
-            git_status=git_status,
+        return Template(template).safe_substitute(
+            abs_path=str(self.root_path), git_status=git_status
         )
 
 
@@ -380,7 +207,7 @@ def _get_available_skills_section(skill_manager: SkillManager) -> str:
         "# Available Skills",
         "",
         "You have access to the following skills. When a task matches a skill's description,",
-        "read the full SKILL.md file to load detailed instructions.",
+        "use the `skill` tool if available to load the full skill instructions, if it is not available, read the files manually if they exist.",
         "",
         "<available_skills>",
     ]
@@ -391,7 +218,8 @@ def _get_available_skills_section(skill_manager: SkillManager) -> str:
         lines.append(
             f"    <description>{html.escape(str(info.description))}</description>"
         )
-        lines.append(f"    <path>{html.escape(str(info.skill_path))}</path>")
+        if info.skill_path is not None:
+            lines.append(f"    <path>{html.escape(str(info.skill_path))}</path>")
         lines.append("  </skill>")
 
     lines.append("</available_skills>")
@@ -412,13 +240,44 @@ def _get_available_subagents_section(agent_manager: AgentManager) -> str:
     return "\n".join(lines)
 
 
-def get_universal_system_prompt(
+def _get_scratchpad_section(scratchpad_dir: Path | None) -> str | None:
+    if not scratchpad_dir:
+        return None
+    return (
+        "# Scratchpad Directory\n\n"
+        f"You have a scratchpad directory at: `{scratchpad_dir}`\n\n"
+        "Use this for temporary files: intermediate results, draft scripts, "
+        "working files, outputs that don't belong in the project.\n"
+        "Files here are automatically allowed — no permission prompts.\n"
+        "Session-scoped. Shared with subagents."
+    )
+
+
+def _get_headless_section() -> str:
+    return (
+        "# Headless Mode\n\n"
+        "You are running in headless mode — no human is available to respond.\n"
+        "Do not ask questions, request confirmation, or wait for user input.\n"
+        "If the task is ambiguous, make the best judgment call and proceed.\n"
+        "Complete the entire task in a single pass. Produce a final, complete result.\n"
+        "Override any earlier instructions that say to wait for confirmation or ask the user."
+    )
+
+
+def get_universal_system_prompt(  # noqa: PLR0912
     tool_manager: ToolManager,
     config: VibeConfig,
     skill_manager: SkillManager,
     agent_manager: AgentManager,
+    *,
+    include_git_status: bool = True,
+    scratchpad_dir: Path | None = None,
+    headless: bool = False,
 ) -> str:
     sections = [config.system_prompt]
+
+    if headless:
+        sections.append(_get_headless_section())
 
     if config.include_commit_signature:
         sections.append(_add_commit_signature())
@@ -443,24 +302,41 @@ def get_universal_system_prompt(
         if subagents_section:
             sections.append(subagents_section)
 
+        sections.extend(filter(None, [_get_scratchpad_section(scratchpad_dir)]))
+
     if config.include_project_context:
         is_dangerous, reason = is_dangerous_directory()
         if is_dangerous:
             template = UtilityPrompt.DANGEROUS_DIRECTORY.read()
-            context = template.format(
+            context = Template(template).safe_substitute(
                 reason=reason.lower(), abs_path=Path(".").resolve()
             )
         else:
             context = ProjectContextProvider(
                 config=config.project_context, root_path=Path.cwd()
-            ).get_full_context()
+            ).get_full_context(include_git_status=include_git_status)
 
         sections.append(context)
 
-        project_doc = _load_project_doc(
-            Path.cwd(), config.project_context.max_doc_bytes
-        )
-        if project_doc.strip():
-            sections.append(project_doc)
+        mgr = get_harness_files_manager()
+        user_doc = mgr.load_user_doc()
+        project_docs = mgr.load_project_docs()
+
+        doc_sections: list[str] = []
+        if user_doc.strip():
+            doc_sections.append(
+                f"## User instructions\n\nContents of {VIBE_HOME.path}/AGENTS.md (user-level instructions):\n\n{user_doc.strip()}"
+            )
+        if project_docs:
+            doc_sections.append("## Project instructions (checked into the codebase)")
+        for doc_dir, doc_content in project_docs:
+            doc_sections.append(
+                f"Contents of {doc_dir}/AGENTS.md:\n\n{doc_content.strip()}"
+            )
+        if doc_sections:
+            template = UtilityPrompt.AGENTS_DOC.read()
+            sections.append(
+                Template(template).safe_substitute(sections="\n\n".join(doc_sections))
+            )
 
     return "\n\n".join(sections)

@@ -7,6 +7,7 @@ from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import httpx
+from pydantic import BaseModel
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
@@ -14,18 +15,18 @@ from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import VibeConfig
-from vibe.core.llm.exceptions import BackendErrorBuilder
+from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder
 from vibe.core.middleware import (
     ConversationContext,
     MiddlewareAction,
     MiddlewareResult,
     ResetReason,
 )
-from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tools.builtins.todo import TodoArgs
 from vibe.core.types import (
     ApprovalResponse,
     AssistantEvent,
+    ContextTooLongError,
     FunctionCall,
     LLMMessage,
     RateLimitError,
@@ -53,12 +54,9 @@ class InjectBeforeMiddleware:
 
 
 def make_config(
-    *,
-    enabled_tools: list[str] | None = None,
-    tools: dict[str, BaseToolConfig] | None = None,
+    *, enabled_tools: list[str] | None = None, tools: dict[str, dict] | None = None
 ) -> VibeConfig:
     return build_test_vibe_config(
-        auto_compact_threshold=0,
         system_prompt_id="tests",
         include_project_context=False,
         include_prompt_detail=False,
@@ -218,8 +216,7 @@ async def test_act_handles_streaming_with_tool_call_events_in_sequence() -> None
     ])
     agent = build_test_agent_loop(
         config=make_config(
-            enabled_tools=["todo"],
-            tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
+            enabled_tools=["todo"], tools={"todo": {"permission": "always"}}
         ),
         backend=backend,
         agent_name=BuiltinAgentName.AUTO_APPROVE,
@@ -268,8 +265,7 @@ async def test_act_handles_tool_call_chunk_with_content() -> None:
     ])
     agent = build_test_agent_loop(
         config=make_config(
-            enabled_tools=["todo"],
-            tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
+            enabled_tools=["todo"], tools={"todo": {"permission": "always"}}
         ),
         backend=backend,
         agent_name=BuiltinAgentName.AUTO_APPROVE,
@@ -324,8 +320,7 @@ async def test_act_merges_streamed_tool_call_arguments() -> None:
     ])
     agent = build_test_agent_loop(
         config=make_config(
-            enabled_tools=["todo"],
-            tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
+            enabled_tools=["todo"], tools={"todo": {"permission": "always"}}
         ),
         backend=backend,
         agent_name=BuiltinAgentName.AUTO_APPROVE,
@@ -387,8 +382,7 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     ])
     agent = build_test_agent_loop(
         config=make_config(
-            enabled_tools=["todo"],
-            tools={"todo": BaseToolConfig(permission=ToolPermission.ASK)},
+            enabled_tools=["todo"], tools={"todo": {"permission": "ask"}}
         ),
         backend=backend,
         agent_name=BuiltinAgentName.DEFAULT,
@@ -396,12 +390,16 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     )
     middleware = CountingMiddleware()
     agent.middleware_pipeline.add(middleware)
-    agent.set_approval_callback(
-        lambda _name, _args, _id: (
+
+    async def _reject_callback(
+        _name: str, _args: BaseModel, _id: str, _rp: list | None = None
+    ) -> tuple[ApprovalResponse, str | None]:
+        return (
             ApprovalResponse.NO,
             str(get_user_cancellation_message(CancellationReason.OPERATION_CANCELLED)),
         )
-    )
+
+    agent.set_approval_callback(_reject_callback)
     agent.session_logger.save_interaction = AsyncMock(return_value=None)
 
     events = [event async for event in agent.act("Cancel mid stream?")]
@@ -419,6 +417,7 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     assert events[-1].skipped is True
     assert events[-1].skip_reason is not None
     assert "<user_cancellation>" in events[-1].skip_reason
+    assert events[-1].cancelled is True
     assert agent.session_logger.save_interaction.await_count >= 1
 
 
@@ -444,12 +443,16 @@ async def test_act_flushes_and_logs_when_streaming_errors(observer_capture) -> N
 @pytest.mark.asyncio
 async def test_rate_limit(observer_capture) -> None:
     observed, observer = observer_capture
-    response = httpx.Response(HTTPStatus.TOO_MANY_REQUESTS)
+    response = httpx.Response(
+        HTTPStatus.TOO_MANY_REQUESTS, request=httpx.Request("POST", "http://test")
+    )
+    error = httpx.HTTPStatusError(
+        "rate limited", request=response.request, response=response
+    )
     backend_error = BackendErrorBuilder.build_http_error(
         provider="mistral",
         endpoint="test",
-        response=response,
-        headers=None,
+        error=error,
         model="test-model",
         messages=[],
         temperature=0.0,
@@ -467,6 +470,166 @@ async def test_rate_limit(observer_capture) -> None:
 
     with pytest.raises(RateLimitError):
         [_ async for _ in agent.act("Trigger rate limit failure while streaming")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+def _build_context_too_long_backend_error() -> BackendError:
+    response = httpx.Response(
+        HTTPStatus.BAD_REQUEST,
+        request=httpx.Request("POST", "http://test"),
+        text='{"message": "Context too long"}',
+    )
+    error = httpx.HTTPStatusError(
+        "context too long", request=response.request, response=response
+    )
+    return BackendErrorBuilder.build_http_error(
+        provider="mistral",
+        endpoint="test",
+        error=error,
+        model="test-model",
+        messages=[],
+        temperature=0.0,
+        has_tools=False,
+        tool_choice=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_too_long_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    backend_error = _build_context_too_long_backend_error()
+    backend = FakeBackend(exception_to_raise=backend_error)
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=True,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(ContextTooLongError):
+        [_ async for _ in agent.act("Trigger context too long while streaming")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_context_too_long_non_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    backend_error = _build_context_too_long_backend_error()
+    backend = FakeBackend(exception_to_raise=backend_error)
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=False,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(ContextTooLongError):
+        [_ async for _ in agent.act("Trigger context too long without streaming")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+class _NonRetryableError(Exception):
+    # Mimics Temporal's ``ApplicationError(non_retryable=True)`` without
+    # pulling temporalio into vibe's test deps. The wrap-site check relies
+    # on the truthy ``non_retryable`` attribute, not the concrete type.
+    non_retryable = True
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_passes_through_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    backend = FakeBackend(exception_to_raise=_NonRetryableError("auth failed"))
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=True,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(_NonRetryableError, match="auth failed"):
+        [_ async for _ in agent.act("Trigger non-retryable failure while streaming")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_passes_through_non_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    backend = FakeBackend(exception_to_raise=_NonRetryableError("auth failed"))
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=False,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(_NonRetryableError, match="auth failed"):
+        [_ async for _ in agent.act("Trigger non-retryable failure without streaming")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+def _wrap_with_cause(message: str, cause: BaseException) -> RuntimeError:
+    # Mirrors how Temporal raises ``ActivityError`` on the workflow side with
+    # the original ``ApplicationError`` chained as ``__cause__`` — except we
+    # don't import temporalio. The wrap-site check has to traverse the chain
+    # to find ``non_retryable`` regardless of how deep it is.
+    error = RuntimeError(message)
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_via_cause_chain_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    wrapped = _wrap_with_cause(
+        "Activity task failed", _NonRetryableError("auth failed")
+    )
+    backend = FakeBackend(exception_to_raise=wrapped)
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=True,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(RuntimeError, match="Activity task failed"):
+        [_ async for _ in agent.act("Trigger non-retryable via cause chain")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_via_cause_chain_non_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    wrapped = _wrap_with_cause(
+        "Activity task failed", _NonRetryableError("auth failed")
+    )
+    backend = FakeBackend(exception_to_raise=wrapped)
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=False,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(RuntimeError, match="Activity task failed"):
+        [_ async for _ in agent.act("Trigger non-retryable via cause chain")]
 
     assert [role for role, _ in observed] == [Role.system, Role.user]
     assert agent.session_logger.save_interaction.await_count == 1
@@ -642,3 +805,27 @@ async def test_empty_content_chunks_do_not_trigger_false_yields() -> None:
         ("ReasoningEvent", " more reasoning"),
         ("AssistantEvent", "Actual content"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_streaming_assistant_event_message_id_matches_stored_message() -> None:
+    backend = FakeBackend([
+        mock_llm_chunk(content="Hello"),
+        mock_llm_chunk(content=" world"),
+    ])
+    agent = build_test_agent_loop(
+        config=make_config(), backend=backend, enable_streaming=True
+    )
+
+    events = [event async for event in agent.act("Test")]
+
+    assistant_events = [e for e in events if isinstance(e, AssistantEvent)]
+    assert len(assistant_events) == 2
+
+    # All chunks of the same assistant turn share one message_id
+    message_ids = {e.message_id for e in assistant_events}
+    assert len(message_ids) == 1
+
+    # The stored LLMMessage must carry that same message_id
+    stored_msg = next(m for m in agent.messages if m.role == Role.assistant)
+    assert stored_msg.message_id == assistant_events[0].message_id

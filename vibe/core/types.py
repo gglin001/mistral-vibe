@@ -11,6 +11,7 @@ from uuid import uuid4
 
 if TYPE_CHECKING:
     from vibe.core.tools.base import BaseTool
+    from vibe.core.tools.permissions import RequiredPermission
 else:
     BaseTool = Any
 
@@ -23,6 +24,21 @@ from pydantic import (
     computed_field,
     model_validator,
 )
+
+
+class ScheduledLoop(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    interval_seconds: int
+    prompt: str
+    next_fire_at: float
+    created_at: float
+
+
+class Backend(StrEnum):
+    MISTRAL = auto()
+    GENERIC = auto()
 
 
 class AgentStats(BaseModel):
@@ -129,24 +145,16 @@ class SessionInfo(BaseModel):
 
 class SessionMetadata(BaseModel):
     session_id: str
+    parent_session_id: str | None = None
     start_time: str
     end_time: str | None
     git_commit: str | None
     git_branch: str | None
     environment: dict[str, str | None]
     username: str
-
-
-class ClientMetadata(BaseModel):
-    name: str
-    version: str
-
-
-class EntrypointMetadata(BaseModel):
-    agent_entrypoint: Literal["cli", "acp", "programmatic"]
-    agent_version: str
-    client_name: str
-    client_version: str
+    loops: list[ScheduledLoop] = Field(default_factory=list)
+    title: str | None = None
+    title_source: Literal["auto", "manual"] = "auto"
 
 
 StrToolChoice = Literal["auto", "none", "any", "required"]
@@ -209,8 +217,11 @@ class LLMMessage(BaseModel):
 
     role: Role
     content: Content | None = None
+    injected: bool = False
     reasoning_content: Content | None = None
+    reasoning_state: list[str] | None = None
     reasoning_signature: str | None = None
+    reasoning_message_id: str | None = None
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
     tool_call_id: str | None = None
@@ -222,15 +233,21 @@ class LLMMessage(BaseModel):
         if isinstance(v, dict):
             v.setdefault("content", "")
             v.setdefault("role", "assistant")
-            if "message_id" not in v and v.get("role") != "tool":
+            if v.get("message_id") is None and v.get("role") != "tool":
                 v["message_id"] = str(uuid4())
+            if v.get("reasoning_message_id") is None and v.get("reasoning_content"):
+                v["reasoning_message_id"] = str(uuid4())
             return v
         role = str(getattr(v, "role", "assistant"))
+        reasoning_content = getattr(v, "reasoning_content", None)
         return {
             "role": role,
             "content": getattr(v, "content", ""),
-            "reasoning_content": getattr(v, "reasoning_content", None),
+            "reasoning_content": reasoning_content,
+            "reasoning_state": getattr(v, "reasoning_state", None),
             "reasoning_signature": getattr(v, "reasoning_signature", None),
+            "reasoning_message_id": getattr(v, "reasoning_message_id", None)
+            or (str(uuid4()) if reasoning_content else None),
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),
@@ -265,6 +282,13 @@ class LLMMessage(BaseModel):
         if not reasoning_signature:
             reasoning_signature = None
 
+        reasoning_state: list[str] | None = None
+        if self.reasoning_state or other.reasoning_state:
+            reasoning_state = [
+                *(self.reasoning_state or []),
+                *(other.reasoning_state or []),
+            ]
+
         tool_calls_map = OrderedDict[int, ToolCall]()
         for tool_calls in [self.tool_calls or [], other.tool_calls or []]:
             for tc in tool_calls:
@@ -290,7 +314,10 @@ class LLMMessage(BaseModel):
             role=self.role,
             content=content,
             reasoning_content=reasoning_content,
+            reasoning_state=reasoning_state,
             reasoning_signature=reasoning_signature,
+            reasoning_message_id=self.reasoning_message_id
+            or other.reasoning_message_id,
             tool_calls=list(tool_calls_map.values()) or None,
             name=self.name,
             tool_call_id=self.tool_call_id,
@@ -314,13 +341,18 @@ class LLMChunk(BaseModel):
     model_config = ConfigDict(frozen=True)
     message: LLMMessage
     usage: LLMUsage | None = None
+    correlation_id: str | None = None
 
     def __add__(self, other: LLMChunk) -> LLMChunk:
         if self.usage is None and other.usage is None:
             new_usage = None
         else:
             new_usage = (self.usage or LLMUsage()) + (other.usage or LLMUsage())
-        return LLMChunk(message=self.message + other.message, usage=new_usage)
+        return LLMChunk(
+            message=self.message + other.message,
+            usage=new_usage,
+            correlation_id=other.correlation_id or self.correlation_id,
+        )
 
 
 class BaseEvent(BaseModel, ABC):
@@ -366,6 +398,7 @@ class ToolResultEvent(BaseEvent):
     error: str | None = None
     skipped: bool = False
     skip_reason: str | None = None
+    cancelled: bool = False
     duration: float | None = None
     tool_call_id: str
 
@@ -374,6 +407,12 @@ class ToolStreamEvent(BaseEvent):
     tool_name: str
     message: str
     tool_call_id: str
+
+
+class WaitingForInputEvent(BaseEvent):
+    task_id: str
+    label: str | None = None
+    predefined_answers: list[str] | None = None
 
 
 class CompactStartEvent(BaseEvent):
@@ -390,11 +429,19 @@ class CompactEndEvent(BaseEvent):
     old_context_tokens: int
     new_context_tokens: int
     summary_length: int
+    old_session_id: str | None = None
+    new_session_id: str | None = None
     # WORKAROUND: Using tool_call to communicate compact events to the client.
     # This should be revisited when the ACP protocol defines how compact events
     # should be represented.
     # [RFD](https://agentclientprotocol.com/rfds/session-usage)
     tool_call_id: str
+
+
+class AgentProfileChangedEvent(BaseEvent):
+    """Emitted when the active agent profile changes during a turn."""
+
+    agent_name: str
 
 
 class OutputFormat(StrEnum):
@@ -403,17 +450,15 @@ class OutputFormat(StrEnum):
     STREAMING = auto()
 
 
-type AsyncApprovalCallback = Callable[
-    [str, BaseModel, str], Awaitable[tuple[ApprovalResponse, str | None]]
+type ApprovalCallback = Callable[
+    [str, BaseModel, str, list[RequiredPermission] | None],
+    Awaitable[tuple[ApprovalResponse, str | None]],
 ]
 
-type SyncApprovalCallback = Callable[
-    [str, BaseModel, str], tuple[ApprovalResponse, str | None]
-]
-
-type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback
 
 type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
+
+type SwitchAgentCallback = Callable[[str], Awaitable[None]]
 
 
 class MessageList(Sequence[LLMMessage]):
@@ -424,6 +469,7 @@ class MessageList(Sequence[LLMMessage]):
     ) -> None:
         self._data: list[LLMMessage] = list(initial) if initial else []
         self._observer = observer
+        self._reset_hooks: list[Callable[[], None]] = []
         self._silent = False
         if self._observer:
             for msg in self._data:
@@ -444,9 +490,25 @@ class MessageList(Sequence[LLMMessage]):
         for msg in msgs:
             self.append(msg)
 
+    def on_reset(self, hook: Callable[[], None]) -> None:
+        """Register a callback that fires whenever the list is reset."""
+        self._reset_hooks.append(hook)
+
     def reset(self, new: list[LLMMessage]) -> None:
         """Replace contents silently (never notifies)."""
         self._data = list(new)
+        for hook in self._reset_hooks:
+            hook()
+
+    def update_system_prompt(self, new: str) -> None:
+        """Update the system prompt in place.
+
+        Called from a background thread during deferred init.  A single
+        list-item assignment is atomic under CPython's GIL, and the
+        ``@requires_init`` decorator ensures no ``act()`` call reads the
+        prompt concurrently, so no additional lock is needed here.
+        """
+        self._data[0] = LLMMessage(role=Role.system, content=new)
 
     @contextmanager
     def silent(self) -> Iterator[None]:
@@ -484,4 +546,14 @@ class RateLimitError(Exception):
         self.model = model
         super().__init__(
             "Rate limits exceeded. Please wait a moment before trying again."
+        )
+
+
+class ContextTooLongError(Exception):
+    def __init__(self, provider: str, model: str) -> None:
+        self.provider = provider
+        self.model = model
+        super().__init__(
+            "The conversation context exceeds the model's maximum limit. "
+            "Use /rewind to undo recent actions, then /compact to summarize the conversation."
         )

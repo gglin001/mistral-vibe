@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.3.0"
+version = "2.9.6"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,18 +27,25 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "agent-client-protocol==0.8.1",
+    "agent-client-protocol==0.9.0",
     "anyio>=4.12.0",
     "cachetools>=5.5.0",
-    "cryptography>=44.0.0,<=46.0.3",
+    "certifi>=2026.4.22",
+    "charset-normalizer>=3.4.4",
+    "cryptography>=44.0.0",
     "gitpython>=3.1.46",
     "giturlparse>=0.14.0",
     "google-auth>=2.0.0",
     "httpx>=0.28.1",
+    "jsonpatch>=1.33",
     "keyring>=25.6.0",
     "markdownify>=1.2.2",
     "mcp>=1.14.0",
-    "mistralai==1.12.4",
+    "mistralai==2.4.4",
+    "opentelemetry-api>=1.39.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.39.1",
+    "opentelemetry-sdk>=1.39.1",
+    "opentelemetry-semantic-conventions>=0.60b1",
     "packaging>=24.1",
     "pexpect>=4.9.0",
     "pydantic>=2.12.4",
@@ -48,12 +55,14 @@ dependencies = [
     "pyyaml>=6.0.0",
     "requests>=2.20.0",
     "rich>=14.0.0",
-    "textual>=7.4.0",
+    "sounddevice>=0.5.1",
+    "textual==8.2.4",
     "textual-speedups>=0.2.1",
     "tomli-w>=1.2.0",
     "tree-sitter>=0.25.2",
     "tree-sitter-bash>=0.25.1",
     "watchfiles>=1.1.1",
+    "websockets>=13.0",
     "zstandard>=0.25.0",
 ]
 
@@ -80,6 +89,9 @@ vibe-acp = "vibe.acp.entrypoint:main"
 
 
 [tool.uv]
+exclude-newer = "7 days"
+exclude-newer-package = { agent-client-protocol = false, mistralai = false }
+
 package = true
 required-version = ">=0.8.0"
 
@@ -88,6 +100,7 @@ required-version = ">=0.8.0"
 dev = [
     "debugpy>=1.8.19",
     "pre-commit>=4.2.0",
+    "pyinstrument>=5.1.2",
     "pyright>=1.1.403",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.2.0",
@@ -101,18 +114,21 @@ dev = [
     "vulture>=2.14",
 ]
 
-build = ["pyinstaller>=6.17.0"]
+build = ["pyinstaller>=6.17.0", "truststore>=0.10.4"]
 
 [tool.pyright]
 pythonVersion = "3.12"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
+
 include = ["vibe/**/*.py", "tests/**/*.py"]
+exclude = ["pyinstaller/"]
 venvPath = "."
 venv = ".venv"
 
 [tool.ruff]
 include = ["vibe/**/*.py", "tests/**/*.py"]
+exclude = ["pyinstaller/"]
 line-length = 88
 target-version = "py312"
 preview = true
@@ -151,19 +167,21 @@ ban-relative-imports = "all"
 [tool.ruff.lint.isort]
 known-first-party = ["vibe"]
 force-sort-within-sections = true
-split-on-trailing-comma = true
+split-on-trailing-comma = false
 combine-as-imports = true
 force-wrap-aliases = false
 order-by-type = true
 required-imports = ["from __future__ import annotations"]
 
 [tool.ruff.lint.pylint]
+max-public-methods = 26
+max-positional-args = 10
 max-statements = 50
 max-branches = 15
 max-locals = 15
-max-args = 9
+max-args = 10
 max-returns = 6
-max-nested-blocks = 4
+max-nested-blocks = 5
 
 [tool.vulture]
 ignore_decorators = ["@*"]

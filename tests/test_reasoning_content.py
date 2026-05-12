@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 import httpx
-import mistralai
+from mistralai.client.models import (
+    AssistantMessage,
+    ContentChunk,
+    TextChunk,
+    ThinkChunk,
+)
 import pytest
 import respx
 
@@ -19,7 +25,6 @@ from vibe.core.types import AssistantEvent, LLMMessage, ReasoningEvent, Role
 
 def make_config() -> VibeConfig:
     return build_test_vibe_config(
-        auto_compact_threshold=0,
         system_prompt_id="tests",
         include_project_context=False,
         include_prompt_detail=False,
@@ -39,8 +44,8 @@ class TestMistralMapperParseContent:
 
     def test_parse_content_text_chunk_returns_content_only(self):
         mapper = MistralMapper()
-        content: list[mistralai.ContentChunk] = [
-            mistralai.TextChunk(type="text", text="Hello from text chunk")
+        content: list[ContentChunk] = [
+            TextChunk(type="text", text="Hello from text chunk")
         ]
 
         result = mapper.parse_content(content)
@@ -51,12 +56,12 @@ class TestMistralMapperParseContent:
 
     def test_parse_content_thinking_chunk_extracts_reasoning(self):
         mapper = MistralMapper()
-        content: list[mistralai.ContentChunk] = [
-            mistralai.ThinkChunk(
+        content: list[ContentChunk] = [
+            ThinkChunk(
                 type="thinking",
-                thinking=[mistralai.TextChunk(type="text", text="Let me think...")],
+                thinking=[TextChunk(type="text", text="Let me think...")],
             ),
-            mistralai.TextChunk(type="text", text="The answer is 42."),
+            TextChunk(type="text", text="The answer is 42."),
         ]
 
         result = mapper.parse_content(content)
@@ -67,16 +72,16 @@ class TestMistralMapperParseContent:
 
     def test_parse_content_multiple_thinking_chunks_concatenates(self):
         mapper = MistralMapper()
-        content: list[mistralai.ContentChunk] = [
-            mistralai.ThinkChunk(
+        content: list[ContentChunk] = [
+            ThinkChunk(
                 type="thinking",
-                thinking=[mistralai.TextChunk(type="text", text="First thought. ")],
+                thinking=[TextChunk(type="text", text="First thought. ")],
             ),
-            mistralai.ThinkChunk(
+            ThinkChunk(
                 type="thinking",
-                thinking=[mistralai.TextChunk(type="text", text="Second thought.")],
+                thinking=[TextChunk(type="text", text="Second thought.")],
             ),
-            mistralai.TextChunk(type="text", text="Final answer."),
+            TextChunk(type="text", text="Final answer."),
         ]
 
         result = mapper.parse_content(content)
@@ -87,10 +92,10 @@ class TestMistralMapperParseContent:
 
     def test_parse_content_thinking_only_returns_empty_content(self):
         mapper = MistralMapper()
-        content: list[mistralai.ContentChunk] = [
-            mistralai.ThinkChunk(
+        content: list[ContentChunk] = [
+            ThinkChunk(
                 type="thinking",
-                thinking=[mistralai.TextChunk(type="text", text="Just thinking...")],
+                thinking=[TextChunk(type="text", text="Just thinking...")],
             )
         ]
 
@@ -100,7 +105,7 @@ class TestMistralMapperParseContent:
 
     def test_parse_content_empty_list_returns_empty(self):
         mapper = MistralMapper()
-        content: list[mistralai.ContentChunk] = []
+        content: list[ContentChunk] = []
 
         result = mapper.parse_content(content)
 
@@ -114,7 +119,7 @@ class TestMistralMapperPrepareMessage:
 
         result = mapper.prepare_message(msg)
 
-        assert isinstance(result, mistralai.AssistantMessage)
+        assert isinstance(result, AssistantMessage)
         assert result.content == "Hello!"
 
     def test_prepare_assistant_message_with_reasoning_creates_chunks(self):
@@ -127,20 +132,20 @@ class TestMistralMapperPrepareMessage:
 
         result = mapper.prepare_message(msg)
 
-        assert isinstance(result, mistralai.AssistantMessage)
+        assert isinstance(result, AssistantMessage)
         assert isinstance(result.content, list)
         assert len(result.content) == 2
 
         think_chunk = result.content[0]
-        assert isinstance(think_chunk, mistralai.ThinkChunk)
+        assert isinstance(think_chunk, ThinkChunk)
         assert think_chunk.type == "thinking"
         assert len(think_chunk.thinking) == 1
         inner_chunk = think_chunk.thinking[0]
-        assert isinstance(inner_chunk, mistralai.TextChunk)
+        assert isinstance(inner_chunk, TextChunk)
         assert inner_chunk.text == "Let me calculate..."
 
         text_chunk = result.content[1]
-        assert isinstance(text_chunk, mistralai.TextChunk)
+        assert isinstance(text_chunk, TextChunk)
         assert text_chunk.type == "text"
         assert text_chunk.text == "The answer is 42."
 
@@ -152,21 +157,17 @@ class TestMistralMapperPrepareMessage:
 
         result = mapper.prepare_message(msg)
 
-        assert isinstance(result, mistralai.AssistantMessage)
+        assert isinstance(result, AssistantMessage)
         assert isinstance(result.content, list)
-        assert len(result.content) == 2
+        assert len(result.content) == 1
 
         think_chunk = result.content[0]
-        assert isinstance(think_chunk, mistralai.ThinkChunk)
+        assert isinstance(think_chunk, ThinkChunk)
         assert think_chunk.type == "thinking"
         assert len(think_chunk.thinking) == 1
         inner_chunk = think_chunk.thinking[0]
-        assert isinstance(inner_chunk, mistralai.TextChunk)
+        assert isinstance(inner_chunk, TextChunk)
         assert inner_chunk.text == "Just thinking..."
-
-        text_chunk = result.content[1]
-        assert isinstance(text_chunk, mistralai.TextChunk)
-        assert text_chunk.text == ""
 
 
 class TestGenericBackendReasoningContent:
@@ -260,13 +261,14 @@ class TestGenericBackendReasoningContent:
 
 
 class TestAPIToolFormatHandlerReasoningContent:
-    def test_process_api_response_message_extracts_reasoning_content(self):
+    def test_process_api_response_message_preserves_reasoning_state_for_history(self):
         handler = APIToolFormatHandler()
 
         mock_message = MagicMock()
         mock_message.role = "assistant"
         mock_message.content = "The answer is 42."
         mock_message.reasoning_content = "Let me think..."
+        mock_message.reasoning_state = ["enc:abc"]
         mock_message.reasoning_signature = None
         mock_message.tool_calls = None
 
@@ -274,6 +276,7 @@ class TestAPIToolFormatHandlerReasoningContent:
 
         assert result.content == "The answer is 42."
         assert result.reasoning_content == "Let me think..."
+        assert result.reasoning_state == ["enc:abc"]
 
     def test_process_api_response_message_handles_missing_reasoning_content(self):
         handler = APIToolFormatHandler()
@@ -287,6 +290,7 @@ class TestAPIToolFormatHandlerReasoningContent:
 
         assert result.content == "Hello"
         assert result.reasoning_content is None
+        assert result.reasoning_state is None
 
 
 class TestAgentLoopStreamingReasoningEvents:
@@ -351,6 +355,15 @@ class TestLLMMessageReasoningContent:
 
         assert dumped["reasoning_content"] == "Thinking..."
 
+    def test_llm_message_model_dump_includes_reasoning_state(self):
+        msg = LLMMessage(
+            role=Role.assistant, content="Answer", reasoning_state=["enc:abc"]
+        )
+
+        dumped = msg.model_dump(exclude_none=True)
+
+        assert dumped["reasoning_state"] == ["enc:abc"]
+
     def test_llm_message_model_dump_excludes_none_reasoning_content(self):
         msg = LLMMessage(role=Role.assistant, content="Answer")
 
@@ -410,6 +423,37 @@ class TestReasoningFieldNameConversion:
         result = adapter._reasoning_from_api(msg_dict, "reasoning_content")
 
         assert result["reasoning_content"] == "Thinking..."
+
+    def test_prepare_request_excludes_reasoning_state_from_completions_payload(self):
+        adapter = OpenAIAdapter()
+        provider = ProviderConfig(
+            name="test",
+            api_base="https://api.example.com/v1",
+            api_key_env_var="API_KEY",
+        )
+
+        request = adapter.prepare_request(
+            model_name="test-model",
+            messages=[
+                LLMMessage(
+                    role=Role.assistant,
+                    content="Answer",
+                    reasoning_content="Thinking...",
+                    reasoning_state=["enc:abc"],
+                )
+            ],
+            temperature=0.2,
+            tools=None,
+            max_tokens=None,
+            tool_choice=None,
+            enable_streaming=False,
+            provider=provider,
+        )
+
+        payload = json.loads(request.body)
+
+        assert payload["messages"][0]["reasoning_content"] == "Thinking..."
+        assert "reasoning_state" not in payload["messages"][0]
 
     @pytest.mark.asyncio
     async def test_complete_with_custom_reasoning_field_name(self):

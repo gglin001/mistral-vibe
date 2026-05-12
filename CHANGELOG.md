@@ -5,6 +5,436 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.6] - 2026-05-11
+
+### Added
+
+- Syntax-highlighted file diffs for `write_file` and `search_replace` in the IDE agent webview
+- Spinner and loader for `!` (bang) command output
+- `prepare release` script can resume after resolving merge conflicts
+
+### Fixed
+
+- Strip wildcard suffix when persisting bash allowlist patterns
+- Build a combined SSL context for all outbound HTTPS requests
+- Hide non-interactive tools from the LLM in ACP and programmatic mode
+
+
+## [2.9.5] - 2026-05-06
+
+### Added
+
+- `/loop` command to run a prompt or slash command on a recurring interval
+- `default_agent` config setting
+- Telemetry instrumentation for the `teleport` command
+- Logging environment variables documented in `--help`
+
+### Changed
+
+- `enable_telemetry` now takes precedence over `enable_otel`
+
+### Fixed
+
+- Non-retryable errors raised by sub-activities now correctly stop the retry when the agent loop runs inside a Temporal activity (deepens the 2.9.4 fix to walk the exception cause chain)
+- Compacted session IDs displayed correctly
+- Reload the history file before writing so parallel instances don't clobber each other
+- `read_file` flagged as truncated when the limit is reached
+- CLI loader left-alignment
+- Default scroll sensitivity in the TUI restored
+- Loosened the "no git commit" constraint
+- Ensure `enable_telemetry` takes precedence over `enable_otel`
+
+
+## [2.9.4] - 2026-05-05
+
+### Added
+
+- `/rename` command to rename the current session
+- `feat: vibe.at_mention_inserted` telemetry event
+- "Always allow" tool permissions persist across sessions
+- Eager agent-loop warmup so `vibe.ready` telemetry fires sooner
+
+### Changed
+
+- `bash` (`!command`) bang commands run via async subprocess for better latency
+- Bumped `mistral` SDK to 2.4.4
+- Bumped `cryptography` to address upstream CVEs
+
+### Fixed
+
+- Preserve `non_retryable` flag on exceptions raised through `_chat` / `_chat_streaming`, so callers driving the agent loop from a Temporal activity can signal "do not retry"
+- `/clear` no longer chains `parent_session_id` to the previous session
+- `vibe.new_session` telemetry no longer fires when resuming a session
+
+### Removed
+
+- Windows ARM build artifacts (no longer published; required to bump `cryptography`)
+
+
+## [2.9.3] - 2026-04-30
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Fix textual version
+
+### Removed
+
+
+## [2.9.2] - 2026-04-29
+
+### Fixed
+
+- Teleport surfaces the latest GitHub connection status while polling
+
+
+## [2.9.1] - 2026-04-29
+
+### Added
+
+- Connector OAuth authentication flow in `/mcp` menu
+- `ConfigPatch` operation types for Vibe Code
+- `extra_headers` field to `ProviderConfig`
+- Structured metadata on ACP tool results
+- `vibe.user_cancelled_action` ACP telemetry coverage
+- `vibe.new_session` telemetry event emitted whenever the session is reset
+
+### Changed
+
+- Migrated default model to `mistral-medium-3.5`
+
+
+## [2.9.0] - 2026-04-28
+
+### Added
+
+- Scratchpad directory for temporary working files shared with subagents
+- `/copy` slash command
+- Experimental hooks system with post-agent-turn lifecycle
+- OpenAI Responses API adapter
+- ACP session fork and session close support
+- Thinking level picker in ACP CLI
+- `--trust` session-only flag and fail-fast behavior in `-p` mode
+- Opus 4.7 model support
+- `ConfigLayer` for layered configuration resolution
+- `~/.vibe/prompts` overrides for builtin prompts
+- Enable/disable MCP servers and individual tools from `/mcp` menu
+- Custom compaction instructions via `/compact`
+- `vibe.ready` telemetry event
+- Usage updates sent after every LLM turn for ACP
+- Headless section in system prompt to prevent bad model behavior
+
+### Changed
+
+- Renamed `auto_approve` config to `bypass_tool_permissions`
+- Increased feedback bar frequency with cooldown and TOML cache
+- Feedback bar only shown when active model is Mistral
+- Centralized telemetry metadata construction and wired through entrypoints
+- Preserved stable session identity across compact/fork/rewind
+- Filtered remote sessions by current user and deduped continue-as-new
+- `--continue` now only looks for sessions of the current working directory
+- Batched widget mounts and narrowed CSS selectors for UI performance
+
+### Fixed
+
+- Autocomplete popup height calculation for wrapped lines
+- Autocomplete popup dismissed on tab completion and escape
+- Double Ctrl+C/Ctrl+D required to quit instead of killing session immediately
+- Context window overrun now shows a friendly error message
+- `MallocStackLogging` error messages suppressed in CLI input
+- `index.lock` leftover on interrupted deferred init
+- Safe `find` commands allowed by default
+- Session ID preserved when resuming sessions through ACP
+- Usage updates sent after tool results instead of tool streams in ACP
+- KV cache warming via x-affinity in count tokens
+
+
+## [2.8.1] - 2026-04-21
+
+### Fixed
+
+- Fixed changelog and whats_new
+
+
+## [2.8.0] - 2026-04-21
+
+### Added
+
+- Builtin skills system with self-awareness skill
+- `cwd` configuration parameter for MCP stdio servers
+- `/connectors` as alias for `/mcp` and `R` refresh shortcut in MCP browser
+- `MergeFieldMetadata` and annotated merge strategy helpers for config schemas
+- `vibe.request_sent` telemetry event fired before each LLM API call
+- Model alias to `tool_call_finished` telemetry event
+
+### Changed
+
+- Deferred heavy init in subagents and ACP sessions to background thread
+- Renamed `request_sent` telemetry fields and added `nb_prompt_chars`
+- Sorted connectors in `/mcp` menu by connection state then alphabetically
+
+### Fixed
+
+- `/debug` command no longer throws
+- Race condition in banner initialization dropping initial state
+
+### Removed
+
+- `/terminal-setup` command
+
+## [2.7.6] - 2026-04-16
+
+### Added
+
+- `MergeStrategy` enum and merge logic for configuration
+- `call_source=vibe_code` field in LLM request metadata
+- "Other" task type for non-code requests in CLI prompt
+
+### Changed
+
+- Parallelized git subprocess calls during startup
+- Extracted command registry and refactored skill resolution
+- 1M context window and thinking budget max for opus
+- Updated default telemetry URL to `api.mistral.ai`
+
+### Fixed
+
+- Markdown fence context loss causing streaming rendering problems
+- Proxy chain URLs in `api_base` parsing
+
+### Removed
+
+- Alt+Left / Alt+Right key bindings from chat input
+
+## [2.7.5] - 2026-04-14
+
+### Changed
+
+- Display detected files and LLM risks in trust folder dialog
+- Text-to-speech via the Mistral SDK with telemetry tracking
+- Deferred MCP and git I/O to background thread for faster CLI startup
+- Made telemetry URL configurable
+- Bumped Textual to 8.2.1
+
+### Fixed
+
+- Encoding detection fallback in `read_safe` for non-UTF-8 files
+- Config saving logic cleanup
+
+## [2.7.4] - 2026-04-09
+
+### Added
+
+- Console View for enhanced debugging and monitoring
+- `/mcp` command to display MCP servers and their status
+- Manual command output forwarding to agent context
+
+### Changed
+
+- Improved web_fetch content truncation for better readability
+- Lazily load heavy dependencies to improve startup time
+- Optimized folder parsing at startup using scandir
+- Include file name in search_replace result display
+
+### Fixed
+
+- Stale configurations from subagent switch
+- ValueError on OTEL context detach in agent_span
+- Clipboard toast preview replaced with fixed text
+- Only agents with type "agent" are loadable with --agent flag
+- Made chat_url nullable in ChatAssistantPublicData
+- Normalized OTEL span exporter endpoint
+- Removed redundant permission prompts for parallel tool calls needing the same permission
+- Removed bottom margin issue in UI
+- Never crash before ACP server starts
+- Use skill in recent commands via the up-arrow navigation
+- Fixed loading order issues in vibe initialization
+
+## [2.7.3] - 2026-04-03
+
+### Added
+
+- `/data-retention` slash command to view Mistral AI's data retention notice and privacy settings
+
+## [2.7.2] - 2026-04-01
+
+### Added
+
+- Alt+Left / Alt+Right keyboard shortcuts for word-wise cursor movement in chat input
+
+### Changed
+
+- Refactored narrator into a dedicated narrator manager
+
+### Fixed
+
+- Broken build on Linux
+- Errored MCP servers are now excluded from the banner count
+- Improved bash denylist matching and error messages
+- Command messages are now skipped during rewind navigation
+
+## [2.7.1] - 2026-03-31
+
+### Added
+
+- ACP message-id support for reliable message boundary identification
+- Reasoning effort parameter for supported models
+
+### Changed
+
+- Updated MistralAI SDK
+- Updated ACP SDK dependency
+- Refined system prompt wording and structure
+- Reduced scroll sensitivity to 1 line per tick for smoother scrolling
+
+### Fixed
+
+- Non-standard HTTP 529 status codes now handled gracefully in error formatting and retried
+- Text selection errors when copying from unmounting components
+- Excluded "injected" field from user messages in generic backend
+
+## [2.7.0] - 2026-03-24
+
+### Added
+
+- Rewind mode to navigate and fork conversation history
+
+### Fixed
+
+- Preserve message_id when aggregating streaming LLM chunks
+- Improved error handling for SDK response errors
+
+## [2.6.2] - 2026-03-23
+
+### Changed
+
+- Pinned agent-client-protocol dependency back to 0.8.1
+
+### Removed
+
+- Context usage updates via ACP
+
+## [2.6.1] - 2026-03-23
+
+### Changed
+
+- Loosened agent-client-protocol version constraint from pinned to minimum bound
+
+## [2.6.0] - 2026-03-23
+
+### Added
+
+- OTEL tracing support for observability
+- Skill tool for managing task lists and workflows
+- Text-to-speech (TTS) functionality
+- Standalone --resume command for session picker
+- BFS for vibe folders to improve startup performance
+- List-based model picker for /model command
+- is_user_prompt flag to Mistral metadata header
+- Correlation ID in user feedback calls
+- Current date added to system prompt in vibe-work
+- TypeScript type inference for large tool outputs in vibe-work-harness
+
+### Changed
+
+- Updated agent-client-protocol to 0.9.0a1
+- Changed inline code color from yellow to green
+- Removed "You have no internet access" from CLI prompt
+- Fine-grained permission system improvements
+- Inject system certs into vibe-acp frozen binary via truststore
+
+### Fixed
+
+- Streaming for currently streamed message when switching agents
+- Proper UI updates when tools switch current agents
+- Space key functionality when holding shift
+- Empty TextChunk not appended when reasoning has no text content
+- Messages removed from user feedback event
+- Bash allowlist/denylist activation on Windows
+- Improved scrolling performance
+- ACP error handling in webview
+- Context usage updates sent via ACP
+- Include `exit_plan_mode` tool only in plan mode
+
+## [2.5.0] - 2026-03-16
+
+### Added
+
+- Dedicated theorem proving agent powered by leanstral, setup with /leanstall
+- More advanced AGENTS.md support:
+  - AGENTS.md in ~/.vibe/ folder for user-level agent instructions
+  - AGENTS.md for subfolders and in parent folders
+- Mistral Code API key info displayed in CLI banner
+- Voice mode with real-time transcription support
+- Parallel tool execution for improved performance
+- Structured ACP error classes for better error handling
+
+### Changed
+
+- Bash allowlist/denylist now active on Windows
+- Auto-completion relevance improved with better filename and path matching
+- History navigation no longer filters by prefix
+- Updated to Mistral SDK v2 import structure
+- Removed `find` from bash default allowlist to prevent -exec abuse
+
+### Fixed
+
+- Improved scrolling performance
+- Web search tool now infers server URL from provider config
+
+## [2.4.2] - 2026-03-12
+
+### Added
+
+- Session ID included in telemetry events for better tracing
+
+### Changed
+
+- Skills now extract arguments when invoked, improving parameter handling
+- Auto-compact threshold falls back to global setting when not defined at model level
+- Update notification toast no longer times out, ensuring the user sees the restart prompt
+- Removed `file_content_before` from Vibe Code, reducing payload size
+
+## [2.4.1] - 2026-03-10
+
+### Added
+
+- `HarnessFilesManager` for selective loading of harness files, enabling SDK usage without accessing the file system.
+
+### Changed
+
+- Web search tool infers server URL from provider config instead of hardcoded production API
+- `ask_user_questions` tool disabled in prompt mode
+
+### Fixed
+
+- Space key fix extended to all `Input` widgets (question prompts, proxy setup) in VS Code terminal
+- Ruff isort/formatter config conflict resolved (`split-on-trailing-comma` set to `false`)
+
+## [2.4.0] - 2026-03-09
+
+### Added
+
+- User plan displayed in the CLI banner
+- Reasoning effort configuration and thinking blocks adapter
+
+### Changed
+
+- Auto-compact threshold is now per-model
+- Removed expensive file scan from system prompt; cached git operations for faster agent switching
+- Improved plan mode
+- Updated `whoami` response handling with new plan type and name fields
+
+### Fixed
+
+- Space key works again in VSCode 1.110+
+- Arrow-key history navigation at wrapped-line boundaries in chat input
+- UTF-8 encoding enforced when reading metadata files
+- Update notifier no longer crashes on unexpected response fields
+
 ## [2.3.0] - 2026-02-27
 
 ### Added
@@ -42,7 +472,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-
 ## [2.2.1] - 2026-02-18
 
 ### Added
@@ -64,7 +493,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Context token widget: preserve stats listeners across `/clear` so token percentage updates correctly
 - Vertex AI: cache credentials to avoid blocking the event loop on every LLM request
 - Bash tool: remove `NO_COLOR` from subprocess env to fix snapshot tests and colored output
-
 
 ## [2.2.0] - 2026-02-17
 
@@ -93,7 +521,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Middleware injection: use standalone user messages instead of mutating flushed messages
 - Revert cryptography 46.0.5 bump for compatibility
 - Pin banner version in UI snapshot tests for stability
-
 
 ## [2.1.0] - 2026-02-11
 
@@ -124,7 +551,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Legacy terminal theme module and agent indicator widget
 - Standalone onboarding theme selection screen (replaced by redesign)
 
-
 ## [2.0.2] - 2026-01-30
 
 ### Added
@@ -145,13 +571,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix global agent prompt not being loaded correctly
 - Do not propose to "resume" when there is nothing to resume
 
-
 ## [2.0.1] - 2026-01-28
 
 ### Fixed
 
 - Fix encoding issues in Windows
-
 
 ## [2.0.0] - 2026-01-27
 
@@ -180,7 +604,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bumped agent-client-protocol to 0.7.1
 - Refactored UI to require AgentLoop at VibeApp construction
 - Updated README with new MCP server config
-- Improved readability of the AskUserQuerstion tool output
+- Improved readability of the AskUserQuestion tool output
 
 ### Fixed
 
@@ -197,7 +621,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - instructions.md support
 - workdir setting in config file
-
 
 ## [1.3.5] - 2026-01-12
 
